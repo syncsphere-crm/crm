@@ -23,10 +23,10 @@ let promptInterval = null;
 let gemmaCapability = null; // { supported: bool, reason?: string }
 let lastSemanticQueryText = '';
 const EXAMPLE_PROMPTS = [
-  '✨ Try: "Who works at Google?"',
-  '✨ Try: "Friends from college"',
-  '✨ Try: "Software developer in NYC"',
-  '✨ Try: "How many people are overdue?" (press Enter)'
+  'Try: "Who works at Google?"',
+  'Try: "Friends from college"',
+  'Try: "Software developer in NYC"',
+  'Try: "How many people are overdue?" (press Enter)'
 ];
 
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11));
@@ -56,9 +56,12 @@ function cacheEls() {
     'gdriveLoginBtn', 'gdriveSyncBtn', 'masterPasswordInput', 'syncStatusLine',
     'syncBtn', 'syncBtnIcon', 'syncBtnLabel',
     'aiToggleBtn', 'aiStatus', 'searchInputContainer', 'aiCapabilityLine',
-    'mergeContactsBtn', 'mergeModal', 'mergePrimarySelect', 'mergeSecondarySelect', 'confirmMergeBtn',
+    'mergeContactsBtn', 'mergeAllBtn', 'mergeModal', 'mergePrimarySelect', 'mergeSecondarySelect', 'confirmMergeBtn',
     'mergeSuggestions',
-    'aiIsland', 'aiIslandTitle', 'aiIslandBody', 'aiIslandClose',
+    'aiIsland', 'aiIslandTitle', 'aiIslandBody', 'aiIslandClose', 'aiModelStatus',
+    'appShell', 'lockScreen', 'lockCreateStep', 'lockUnlockStep',
+    'lockCreatePassword', 'lockCreatePasswordConfirm', 'lockCreateBtn', 'lockCreateError',
+    'lockUnlockPassword', 'lockUnlockBtn', 'lockUnlockError',
   ];
   ids.forEach((id) => { 
     els[id] = document.getElementById(id); 
@@ -458,6 +461,45 @@ async function maybeAskGemma(queryText, topContactIds) {
   }
 }
 
+/** Kicked off right after login so the model is already warm by the time
+ * someone turns on AI search, instead of eating a multi-second (or
+ * multi-minute, on a slow connection) delay on first use. Shows progress in
+ * a small label anchored under the AI toggle button, and keeps that button
+ * disabled/greyed out for the whole download. */
+async function preloadAIModel() {
+  if (!window.GemmaAI || !els.aiToggleBtn) return;
+
+  gemmaCapability = await window.GemmaAI.detectCapability();
+  if (!gemmaCapability.supported) {
+    els.aiToggleBtn.disabled = true;
+    els.aiToggleBtn.classList.add('unavailable');
+    els.aiToggleBtn.title = `AI search unavailable: ${gemmaCapability.reason}`;
+    return;
+  }
+
+  els.aiToggleBtn.disabled = true;
+  els.aiToggleBtn.classList.add('loading');
+  if (els.aiModelStatus) { els.aiModelStatus.hidden = false; els.aiModelStatus.textContent = 'Loading AI model… 0%'; }
+
+  try {
+    await window.GemmaAI.loadModel((pct) => {
+      if (els.aiModelStatus) els.aiModelStatus.textContent = `Loading AI model… ${pct}%`;
+    });
+    els.aiToggleBtn.disabled = false;
+    els.aiToggleBtn.classList.remove('loading');
+    if (els.aiModelStatus) {
+      els.aiModelStatus.textContent = 'AI model ready';
+      setTimeout(() => { if (els.aiModelStatus) els.aiModelStatus.hidden = true; }, 2500);
+    }
+  } catch (err) {
+    console.error(err);
+    els.aiToggleBtn.disabled = true;
+    els.aiToggleBtn.classList.add('unavailable');
+    els.aiToggleBtn.classList.remove('loading');
+    if (els.aiModelStatus) els.aiModelStatus.textContent = 'AI model failed to load';
+  }
+}
+
 async function initGemmaCapabilityUI() {
   if (!window.GemmaAI) return;
   gemmaCapability = await window.GemmaAI.detectCapability();
@@ -703,6 +745,8 @@ function renderMergeSuggestions() {
   if (!els.mergeSuggestions) return;
   const suggestions = findDuplicateSuggestions();
 
+  if (els.mergeAllBtn) els.mergeAllBtn.disabled = suggestions.length === 0;
+
   if (!suggestions.length) { els.mergeSuggestions.innerHTML = ''; return; }
 
   els.mergeSuggestions.innerHTML = suggestions.map(s => `
@@ -746,8 +790,9 @@ function openMergeModal() {
 
 /** Core merge logic, shared by the manual merge modal and the one-click
  * auto-merge suggestions above. */
-function executeMergeContacts(pId, sId) {
-  if (pId === sId) return toast("Primary and secondary contact must be different.");
+function executeMergeContacts(pId, sId, opts = {}) {
+  const silent = !!opts.silent;
+  if (pId === sId) { if (!silent) toast("Primary and secondary contact must be different."); return; }
 
   const primary = window.state.contacts.find(c => c.id === pId);
   const secondary = window.state.contacts.find(c => c.id === sId);
@@ -783,10 +828,33 @@ function executeMergeContacts(pId, sId) {
   secondary.isDeleted = true;
   secondary.updatedAt = Date.now();
 
+  if (!silent) {
+    saveAllToStorage();
+    renderDirectory();
+    if (els.mergeModal) els.mergeModal.hidden = true;
+    toast(`Merged ${secondary.fullName} into ${primary.fullName}`);
+  }
+}
+
+/** Merges every currently-suggested duplicate pair in one go. Recomputes
+ * suggestions after each merge (ids shift as contacts get marked deleted),
+ * with a safety cap so a scoring quirk can never loop forever. */
+function mergeAllSuggested() {
+  let suggestions = findDuplicateSuggestions();
+  if (!suggestions.length) { toast('No duplicate suggestions to merge.'); return; }
+
+  let count = 0;
+  const safetyCap = 200;
+  while (suggestions.length && count < safetyCap) {
+    const s = suggestions[0];
+    executeMergeContacts(s.a.id, s.b.id, { silent: true });
+    count++;
+    suggestions = findDuplicateSuggestions();
+  }
+
   saveAllToStorage();
   renderDirectory();
-  if (els.mergeModal) els.mergeModal.hidden = true;
-  toast(`Merged ${secondary.fullName} into ${primary.fullName}`);
+  toast(`Merged ${count} duplicate pair${count === 1 ? '' : 's'}.`);
 }
 
 // --- Modals ---
@@ -954,9 +1022,84 @@ function processVCardFile(file) {
   reader.readAsText(file);
 }
 
+// --- Login / lock screen ---
+// Gates the app behind the same password vault crypto.js already uses for
+// encrypted Drive backups: first run asks the person to create a password,
+// every run after that asks them to enter it. The vault key only ever lives
+// in memory for the tab's lifetime (see crypto.js), so this is a real lock,
+// not just a UI toggle — nothing renders until it unlocks.
+let appInitialized = false;
+
+function initLockScreen() {
+  const hasVault = CryptoEngine.hasExistingVault();
+  if (els.lockCreateStep) els.lockCreateStep.hidden = hasVault;
+  if (els.lockUnlockStep) els.lockUnlockStep.hidden = !hasVault;
+  if (!hasVault && els.lockCreatePassword) els.lockCreatePassword.focus();
+  else if (els.lockUnlockPassword) els.lockUnlockPassword.focus();
+
+  if (els.lockCreateBtn) els.lockCreateBtn.addEventListener('click', handleCreatePassword);
+  if (els.lockUnlockBtn) els.lockUnlockBtn.addEventListener('click', handleUnlock);
+  if (els.lockCreatePasswordConfirm) els.lockCreatePasswordConfirm.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleCreatePassword(); });
+  if (els.lockUnlockPassword) els.lockUnlockPassword.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleUnlock(); });
+}
+
+async function handleCreatePassword() {
+  const pwd = els.lockCreatePassword.value;
+  const confirmPwd = els.lockCreatePasswordConfirm.value;
+  if (els.lockCreateError) els.lockCreateError.hidden = true;
+
+  if (pwd.length < 6) {
+    if (els.lockCreateError) { els.lockCreateError.textContent = 'Password must be at least 6 characters.'; els.lockCreateError.hidden = false; }
+    return;
+  }
+  if (pwd !== confirmPwd) {
+    if (els.lockCreateError) { els.lockCreateError.textContent = "Passwords don't match."; els.lockCreateError.hidden = false; }
+    return;
+  }
+
+  els.lockCreateBtn.disabled = true;
+  try {
+    await CryptoEngine.initializeVault(pwd);
+    unlockApp();
+  } catch (err) {
+    console.error(err);
+    if (els.lockCreateError) { els.lockCreateError.textContent = 'Could not create a password on this device.'; els.lockCreateError.hidden = false; }
+    els.lockCreateBtn.disabled = false;
+  }
+}
+
+async function handleUnlock() {
+  const pwd = els.lockUnlockPassword.value;
+  if (els.lockUnlockError) els.lockUnlockError.hidden = true;
+  els.lockUnlockBtn.disabled = true;
+  try {
+    const ok = await CryptoEngine.unlockVault(pwd);
+    if (ok) {
+      unlockApp();
+    } else {
+      if (els.lockUnlockError) { els.lockUnlockError.textContent = 'Incorrect password.'; els.lockUnlockError.hidden = false; }
+      els.lockUnlockBtn.disabled = false;
+    }
+  } catch (err) {
+    console.error(err);
+    if (els.lockUnlockError) { els.lockUnlockError.textContent = 'Something went wrong unlocking.'; els.lockUnlockError.hidden = false; }
+    els.lockUnlockBtn.disabled = false;
+  }
+}
+
+function unlockApp() {
+  if (els.lockScreen) els.lockScreen.hidden = true;
+  if (els.appShell) els.appShell.hidden = false;
+  initApp();
+  preloadAIModel();
+}
+
 // --- Init & Events ---
-document.addEventListener('DOMContentLoaded', () => {
-  cacheEls(); loadAllFromStorage(); renderDirectory();
+function initApp() {
+  if (appInitialized) return;
+  appInitialized = true;
+
+  loadAllFromStorage(); renderDirectory();
   initGemmaCapabilityUI();
 
   if (els.settingsBtn) els.settingsBtn.addEventListener('click', () => { els.settingsModal.hidden = false; });
@@ -1024,6 +1167,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Merge Feature Handlers
   if (els.mergeContactsBtn) els.mergeContactsBtn.addEventListener('click', openMergeModal);
+  if (els.mergeAllBtn) els.mergeAllBtn.addEventListener('click', mergeAllSuggested);
   if (els.confirmMergeBtn) els.confirmMergeBtn.addEventListener('click', () => executeMergeContacts(els.mergePrimarySelect.value, els.mergeSecondarySelect.value));
 
   // vCard File Upload & Dropzone Handlers
@@ -1099,4 +1243,13 @@ document.addEventListener('DOMContentLoaded', () => {
   
   document.querySelectorAll('[data-close]').forEach(btn => btn.addEventListener('click', () => document.getElementById(btn.dataset.close).hidden = true));
   document.querySelectorAll('.modal-backdrop').forEach(b => b.addEventListener('mousedown', e => { if (e.target === b) b.hidden = true; }));
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  cacheEls();
+  initLockScreen();
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('./sw.js').catch((err) => console.warn('Service worker registration failed:', err));
+  }
 });

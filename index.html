@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SyncSphere — Personal CRM</title>
 <link rel="stylesheet" href="./styles.css">
+<link rel="manifest" href="./manifest.json">
 <!-- Google Identity Services Library required for Google Drive OAuth -->
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
@@ -69,22 +70,84 @@
 </head>
 <body>
 
-<div id="appShell" class="app-shell">
+<div id="lockScreen" class="lock-screen">
+  <div class="lock-card">
+    <div class="lock-mark">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="5" r="2.2"></circle>
+        <circle cx="5" cy="17" r="2.2"></circle>
+        <circle cx="19" cy="17" r="2.2"></circle>
+        <path d="M10.4 6.8L6.6 15.2M13.6 6.8l3.8 8.4M7.3 17h9.4"></path>
+      </svg>
+    </div>
+    <h1>SyncSphere</h1>
+    <p class="lock-sub">Your contacts live only on this device. Enter your password to unlock.</p>
+
+    <div id="lockCreateStep" class="lock-step" hidden>
+      <p class="lock-label">Create a password</p>
+      <p class="lock-hint">This locks the app on this device. There's no recovery if you forget it, so write it down somewhere safe.</p>
+      <input type="password" id="lockCreatePassword" class="input" placeholder="New password" autocomplete="new-password">
+      <input type="password" id="lockCreatePasswordConfirm" class="input" placeholder="Confirm password" autocomplete="new-password" style="margin-top:8px;">
+      <button type="button" id="lockCreateBtn" class="btn btn-primary btn-block">Create password &amp; continue</button>
+      <p id="lockCreateError" class="lock-error" hidden></p>
+    </div>
+
+    <div id="lockUnlockStep" class="lock-step" hidden>
+      <p class="lock-label">Password</p>
+      <input type="password" id="lockUnlockPassword" class="input" placeholder="Enter password" autocomplete="current-password">
+      <button type="button" id="lockUnlockBtn" class="btn btn-primary btn-block">Unlock</button>
+      <p id="lockUnlockError" class="lock-error" hidden></p>
+    </div>
+  </div>
+</div>
+
+<div id="appShell" class="app-shell" hidden>
   <header class="topbar">
     <div class="topbar-row">
-      <div class="brand">SyncSphere</div>
+      <div class="brand">
+        <span class="icon brand-mark">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="5" r="2.2"></circle>
+            <circle cx="5" cy="17" r="2.2"></circle>
+            <circle cx="19" cy="17" r="2.2"></circle>
+            <path d="M10.4 6.8L6.6 15.2M13.6 6.8l3.8 8.4M7.3 17h9.4"></path>
+          </svg>
+        </span>
+        <span class="brand-text">SyncSphere</span>
+      </div>
       <div class="search-wrap">
         <div class="search-input-container" id="searchInputContainer">
           <input type="search" id="globalSearch" class="search-input" placeholder="Search names, notes, tags…">
-          <button type="button" id="aiToggleBtn" class="ai-toggle-btn" title="Toggle AI Semantic Search">✨</button>
+          <button type="button" id="aiToggleBtn" class="ai-toggle-btn" title="Toggle AI Semantic Search" disabled>
+            <span class="icon">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                <path d="M12 2l1.6 5.4L19 9l-5.4 1.6L12 16l-1.6-5.4L5 9l5.4-1.6L12 2z"></path>
+                <path d="M19 14l.8 2.2L22 17l-2.2.8L19 20l-.8-2.2L16 17l2.2-.8L19 14z"></path>
+              </svg>
+            </span>
+          </button>
+          <span id="aiModelStatus" class="ai-model-status" hidden></span>
         </div>
         <span id="aiStatus"></span>
       </div>
       <div class="topbar-actions">
         <button type="button" id="syncBtn" class="btn btn-primary btn-sync" title="Sync with Google Drive">
-          <span id="syncBtnIcon" class="sync-icon">⟳</span><span id="syncBtnLabel">Sync</span>
+          <span id="syncBtnIcon" class="icon sync-icon">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <polyline points="1 20 1 14 7 14"></polyline>
+              <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
+            </svg>
+          </span><span id="syncBtnLabel">Sync</span>
         </button>
-        <button type="button" id="settingsBtn" class="btn btn-icon" title="Settings">⚙️</button>
+        <button type="button" id="settingsBtn" class="btn btn-icon" title="Settings">
+          <span class="icon">
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.98 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 8.98a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1.03-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9c.24.42.6.77 1.03 1a1.7 1.7 0 0 0 1.56-1.03H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z"></path>
+          </svg>
+          </span>
+        </button>
       </div>
     </div>
     <nav class="tabbar">
@@ -102,7 +165,18 @@
         <button type="button" id="overdueFilterBtn" class="chip" data-active="false">Overdue</button>
         <div class="filter-spacer"></div>
         <span id="resultCount" class="result-count"></span>
-        <button type="button" id="mergeContactsBtn" class="btn btn-secondary" style="margin-right: 8px;">🔀 Merge</button>
+        <button type="button" id="mergeAllBtn" class="btn btn-secondary" style="margin-right: 8px;" disabled>Merge all</button>
+        <button type="button" id="mergeContactsBtn" class="btn btn-secondary" style="margin-right: 8px;">
+          <span class="icon">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="6" cy="6" r="2.2"></circle>
+              <circle cx="6" cy="18" r="2.2"></circle>
+              <circle cx="18" cy="6" r="2.2"></circle>
+              <path d="M6 8.2V15.8"></path>
+              <path d="M18 8.2a6 6 0 0 1-6 6H8.2"></path>
+            </svg>
+          </span> Merge
+        </button>
         <button type="button" id="addContactBtn" class="btn btn-primary">+ New contact</button>
       </div>
       <div id="mergeSuggestions" class="merge-suggestions"></div>

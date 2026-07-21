@@ -103,12 +103,19 @@ export async function loadModel(onProgress) {
 export async function answerQuestion(question, contactsContext) {
   if (!generator) throw new Error('Model not loaded yet.');
 
+  // NOTE: Gemma 3's chat template only defines user/model turns — it has no
+  // "system" role, and passing one throws a template error at generation
+  // time (e.g. "System role not supported"). That's why answers were failing
+  // on every device regardless of GPU: the previous version above sent a
+  // separate system message. Folding the instruction into the single user
+  // turn avoids the template error entirely.
   const messages = [
     {
-      role: 'system',
-      content: "You are a helpful assistant for a personal CRM. Answer the user's question in 1-3 short sentences, using ONLY the contact data provided. If the answer isn't in the data, say you don't know.",
+      role: 'user',
+      content:
+        "You are a helpful assistant for a personal CRM. Answer the question in 1-3 short sentences, using ONLY the contact data provided. If the answer isn't in the data, say you don't know.\n\n" +
+        `Contact data:\n${contactsContext}\n\nQuestion: ${question}`,
     },
-    { role: 'user', content: `Contact data:\n${contactsContext}\n\nQuestion: ${question}` },
   ];
 
   const output = await generator(messages, {
