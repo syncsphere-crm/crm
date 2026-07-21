@@ -44,12 +44,14 @@ function cacheEls() {
     'overdueFilterBtn','relationFilter','resultCount','addContactBtn','reportOverdue',
     'reportTags','exportRawBtn','exportCsvBtn','dropZone','triggerVcfBtn','vcfInput','contactModal',
     'contactModalTitle','contactId','fullNameInput','tagsInput','frequencyInput', 'frequencyUnitInput',
+    'companyInput', 'jobTitleInput', 'schoolInput', 'locationInput',
     'handleRows','addHandleBtn','relationRows','relationTargetSelect','relationLabelInput',
     'addRelationBtn','notesInput','addInteractionBtn','interactionList','deleteContactBtn',
     'saveContactBtn','interactionModal','quickInteractionContactId','quickChannelInput',
     'quickSummaryInput','saveQuickInteractionBtn','settingsModal','wipeLocalBtn',
     'pfpInput', 'pfpPreview', 'pfpImg', 'pfpInitial', 'removePfpBtn',
-    'gdriveLoginBtn', 'gdriveSyncBtn', 'masterPasswordInput', 'aiToggleBtn', 'aiStatus',
+    'gdriveLoginBtn', 'gdriveSyncBtn', 'gdriveLoadBtn', 'masterPasswordInput',
+    'aiToggleBtn', 'aiStatus', 'searchInputContainer',
     'mergeContactsBtn', 'mergeModal', 'mergePrimarySelect', 'mergeSecondarySelect', 'confirmMergeBtn'
   ];
   ids.forEach((id) => { 
@@ -70,56 +72,113 @@ function saveAllToStorage() {
   indexSemanticSearch();
 }
 
+const DRIVE_CONNECTED_KEY = 'rolodex_drive_connected_v1';
+
+/**
+ * Merge a remote contact list into the local one, per-contact last-write-wins
+ * by updatedAt. This is what actually makes multi-device sync safe: previously
+ * a Drive load just overwrote window.state.contacts wholesale, so loading on
+ * a second device could silently erase edits made locally after the last sync.
+ */
+function mergeContactsLWW(localContacts, remoteContacts) {
+  const byId = new Map(localContacts.map(c => [c.id, c]));
+  remoteContacts.forEach((remote) => {
+    const local = byId.get(remote.id);
+    if (!local || (remote.updatedAt || 0) > (local.updatedAt || 0)) {
+      byId.set(remote.id, remote);
+    }
+  });
+  return Array.from(byId.values());
+}
+
+function updateDriveUI() {
+  if (!els.gdriveLoginBtn) return;
+  els.gdriveLoginBtn.textContent = GoogleDrive.isSignedIn()
+    ? 'Drive: Connected (tap to disconnect)'
+    : 'Login to Google Drive';
+}
+
 async function handleDriveSync() {
-  const pwd = els.masterPasswordInput.value;
-  if (!pwd) return toast('Master password required for encryption.');
   if (!GoogleDrive.isSignedIn()) return toast('Please login to Google Drive first.');
+  const pwd = els.masterPasswordInput.value.trim();
 
   try {
-    toast('Encrypting and syncing...');
-    if (!CryptoEngine.hasExistingVault()) {
-      await CryptoEngine.initializeVault(pwd);
+    let payload;
+    if (pwd) {
+      toast('Encrypting and saving to Drive...');
+      if (!CryptoEngine.hasExistingVault()) {
+        await CryptoEngine.initializeVault(pwd);
+      } else {
+        const unlocked = await CryptoEngine.unlockVault(pwd);
+        if (!unlocked) return toast('Invalid master password.');
+      }
+      payload = await CryptoEngine.encrypt(window.state.contacts);
+      payload.encrypted = true;
     } else {
-      const unlocked = await CryptoEngine.unlockVault(pwd);
-      if (!unlocked) return toast('Invalid master password.');
+      toast('Saving to Drive...');
+      payload = { v: 1, encrypted: false, data: window.state.contacts };
     }
-
-    const payload = await CryptoEngine.encrypt(window.state.contacts);
     await GoogleDrive.uploadBackup(payload);
-    toast('Successfully synced to Google Drive!');
+    toast('Saved to Google Drive.');
   } catch (err) {
     console.error(err);
-    toast('Sync failed. Check console.');
+    toast('Save failed. Check console.');
   }
 }
 
-async function handleDriveLoad() {
-  const pwd = els.masterPasswordInput.value;
-  if (!pwd) return toast('Master password required for decryption.');
-  if (!GoogleDrive.isSignedIn()) return toast('Please login to Google Drive first.');
+async function handleDriveLoad(opts = {}) {
+  const silent = !!opts.silent;
+  if (!GoogleDrive.isSignedIn()) { if (!silent) toast('Please login to Google Drive first.'); return; }
 
   try {
-    toast('Downloading and decrypting...');
+    if (!silent) toast('Loading from Google Drive...');
     const payload = await GoogleDrive.downloadBackup();
-    if (!payload) return toast('No backup found on Drive.');
+    if (!payload) { if (!silent) toast('No backup found on Drive yet — try "Save to Drive" first.'); return; }
 
-    if (!CryptoEngine.hasExistingVault()) {
-       await CryptoEngine.initializeVault(pwd);
+    // Legacy backups (from before encryption became optional) don't have an
+    // `encrypted` flag but always have `iv`/`data` from CryptoEngine.encrypt.
+    const isEncrypted = payload.encrypted === true || (payload.iv && typeof payload.data === 'string');
+
+    let remoteContacts;
+    if (isEncrypted) {
+      const pwd = els.masterPasswordInput.value.trim();
+      if (!pwd) { if (!silent) toast('This backup is encrypted — enter the master password first.'); return; }
+      if (!CryptoEngine.hasExistingVault()) {
+        await CryptoEngine.initializeVault(pwd);
+      } else {
+        const unlocked = await CryptoEngine.unlockVault(pwd);
+        if (!unlocked) { if (!silent) toast('Invalid master password.'); return; }
+      }
+      remoteContacts = await CryptoEngine.decrypt(payload);
     } else {
-       const unlocked = await CryptoEngine.unlockVault(pwd);
-       if (!unlocked) return toast('Invalid master password.');
+      remoteContacts = Array.isArray(payload) ? payload : payload.data;
     }
 
-    const decrypted = await CryptoEngine.decrypt(payload);
-    if (decrypted && Array.isArray(decrypted)) {
-      window.state.contacts = decrypted;
+    if (Array.isArray(remoteContacts)) {
+      window.state.contacts = mergeContactsLWW(window.state.contacts, remoteContacts);
       saveAllToStorage();
       renderDirectory();
-      toast('Data loaded from Google Drive!');
+      if (!silent) toast('Synced with Google Drive.');
     }
   } catch (err) {
     console.error(err);
-    toast('Load failed. Password might be wrong.');
+    if (!silent) toast('Load failed. Password might be wrong.');
+  }
+}
+
+/** Called once on startup: if we've connected before, try to restore the
+ * session without any popup. Does nothing (and shows nothing) if that fails —
+ * failing silently here is the point, since most visitors have never
+ * connected Drive at all. */
+async function attemptSilentDriveLogin() {
+  if (localStorage.getItem(DRIVE_CONNECTED_KEY) !== 'true') return;
+  for (let i = 0; i < 20 && typeof google === 'undefined'; i++) {
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  const ok = await GoogleDrive.trySilentSignIn().catch(() => false);
+  if (ok) {
+    updateDriveUI();
+    await handleDriveLoad({ silent: true });
   }
 }
 
@@ -137,6 +196,12 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+function setAIRingState(active, thinking = false) {
+  if (!els.searchInputContainer) return;
+  els.searchInputContainer.classList.toggle('ai-active', active);
+  els.searchInputContainer.classList.toggle('ai-thinking', active && thinking);
+}
+
 // --- Semantic Worker System ---
 function initSemanticWorker() {
   if (semanticWorker) return;
@@ -148,11 +213,32 @@ function initSemanticWorker() {
       if (type === 'index-complete') {
         if (els.aiStatus && window.state.aiSearchEnabled) els.aiStatus.textContent = 'AI Model Ready';
       } else if (type === 'query-result') {
-        const matchingIds = new Set(results.filter(r => r.score > 0.25).map(r => r.id));
-        renderDirectoryWithFilter((c) => matchingIds.has(c.id));
+        // Hybrid scoring: literal keyword hits get a boost on top of the semantic
+        // similarity score, and — crucially — the ranked order is preserved all
+        // the way to rendering (previously it was silently discarded and every
+        // result set got re-sorted alphabetically, which is why AI mode never
+        // looked any different from plain keyword search).
+        const q = window.state.searchQuery.toLowerCase();
+        const ranked = results
+          .map((r) => {
+            const c = window.state.contacts.find((x) => x.id === r.id);
+            let score = r.score;
+            if (c && q) {
+              const haystack = `${c.fullName} ${(c.tags || []).join(' ')} ${c.company || ''} ${c.jobTitle || ''} ${c.school || ''} ${c.notes || ''}`.toLowerCase();
+              if (haystack.includes(q)) score += 0.15;
+            }
+            return { id: r.id, score };
+          })
+          .filter((r) => r.score > 0.22)
+          .sort((a, b) => b.score - a.score);
+
+        const matchingIds = new Set(ranked.map((r) => r.id));
+        renderDirectoryWithFilter((c) => matchingIds.has(c.id), ranked.map((r) => r.id));
+        setAIRingState(true, false);
         if (els.aiStatus) els.aiStatus.textContent = `Found ${matchingIds.size} semantic matches`;
       } else if (type === 'error') {
         console.error("Worker error:", message);
+        setAIRingState(true, false);
         if (els.aiStatus) els.aiStatus.textContent = 'AI Search error';
       }
     };
@@ -164,12 +250,25 @@ function initSemanticWorker() {
 function indexSemanticSearch() {
   if (!semanticWorker) initSemanticWorker();
   if (!semanticWorker) return;
-  
-  const docs = window.state.contacts.filter(c => !c.isDeleted).map(c => ({
-    id: c.id,
-    text: `Name: ${c.fullName}. Tags: ${(c.tags||[]).join(' ')}. Notes: ${c.notes || ''}`
-  }));
-  
+
+  const docs = window.state.contacts.filter(c => !c.isDeleted).map(c => {
+    const relText = (c.relationships || [])
+      .map(r => `${r.label} of ${window.state.contacts.find(t => t.id === r.targetContactId)?.fullName || ''}`)
+      .join(', ');
+    const handleText = (c.contactMethods || []).map(h => h.platform).join(' ');
+    const parts = [
+      `Name: ${c.fullName}.`,
+      c.jobTitle || c.company ? `Works as ${[c.jobTitle, c.company].filter(Boolean).join(' at ')}.` : '',
+      c.school ? `Studied at ${c.school}.` : '',
+      c.location ? `Located in ${c.location}.` : '',
+      (c.tags || []).length ? `Tags: ${c.tags.join(', ')}.` : '',
+      relText ? `Relationships: ${relText}.` : '',
+      handleText ? `Reachable via: ${handleText}.` : '',
+      c.notes ? `Notes: ${c.notes}` : '',
+    ];
+    return { id: c.id, text: parts.filter(Boolean).join(' ') };
+  });
+
   semanticWorker.postMessage({ type: 'index', payload: docs, requestId: Date.now() });
 }
 
@@ -180,6 +279,7 @@ function toggleAISearchMode() {
   }
 
   clearInterval(promptInterval);
+  setAIRingState(window.state.aiSearchEnabled, false);
 
   if (window.state.aiSearchEnabled) {
     if (!semanticWorker) initSemanticWorker();
@@ -205,14 +305,18 @@ function handleSearchInput() {
 
   if (!query) {
     renderDirectory();
-    if (window.state.aiSearchEnabled && els.aiStatus) els.aiStatus.textContent = "AI Search Mode Active";
+    if (window.state.aiSearchEnabled) {
+      setAIRingState(true, false);
+      if (els.aiStatus) els.aiStatus.textContent = "AI Search Mode Active";
+    }
     return;
   }
 
   if (window.state.aiSearchEnabled) {
     if (!semanticWorker) initSemanticWorker();
+    setAIRingState(true, true);
     if (els.aiStatus) els.aiStatus.textContent = "Analyzing meanings...";
-    semanticWorker.postMessage({ type: 'query', payload: { text: query, topK: 20 }, requestId: Date.now() });
+    semanticWorker.postMessage({ type: 'query', payload: { text: query, topK: 30 }, requestId: Date.now() });
   } else {
     renderDirectory();
   }
@@ -237,7 +341,7 @@ function populateFilterDropdowns() {
   }
 }
 
-function renderDirectoryWithFilter(customFilter = null) {
+function renderDirectoryWithFilter(customFilter = null, rankedIds = null) {
   populateFilterDropdowns();
   let list = window.state.contacts.filter(c => !c.isDeleted);
   
@@ -251,7 +355,12 @@ function renderDirectoryWithFilter(customFilter = null) {
     if (window.state.relationFilter) list = list.filter(c => (c.relationships || []).some(r => r.targetContactId === window.state.relationFilter));
   }
   
-  list.sort((a, b) => a.fullName.localeCompare(b.fullName));
+  if (rankedIds) {
+    const rank = new Map(rankedIds.map((id, i) => [id, i]));
+    list.sort((a, b) => (rank.get(a.id) ?? Infinity) - (rank.get(b.id) ?? Infinity));
+  } else {
+    list.sort((a, b) => a.fullName.localeCompare(b.fullName));
+  }
   
   if (els.resultCount) els.resultCount.textContent = `${list.length} contacts`;
   if (els.contactGrid) els.contactGrid.innerHTML = '';
@@ -266,13 +375,14 @@ function renderDirectoryWithFilter(customFilter = null) {
         : initials(c.fullName);
 
     const primaryHandle = (c.contactMethods || []).find(h => h.value?.trim());
+    const subtitle = [c.jobTitle, c.company].filter(Boolean).join(' at ') || c.school || c.location || '';
 
     card.innerHTML = `
       <div class="card-top">
         <div class="card-pfp" style="overflow:hidden;">${pfpHtml}</div>
         <div>
           <div class="card-name">${escapeHtml(c.fullName)}</div>
-          ${primaryHandle ? `<div class="card-handles">${escapeHtml(primaryHandle.value)}</div>` : ''}
+          ${subtitle ? `<div class="card-handles">${escapeHtml(subtitle)}</div>` : (primaryHandle ? `<div class="card-handles">${escapeHtml(primaryHandle.value)}</div>` : '')}
         </div>
       </div>
       <div class="card-tags">${(c.tags || []).slice(0, 4).map((t) => `<span class="card-tag">${escapeHtml(t)}</span>`).join('')}</div>
@@ -340,10 +450,14 @@ function exportRawJson() {
 
 function exportCsv() {
   const active = window.state.contacts.filter(c => !c.isDeleted);
-  const header = ['Full Name', 'Tags', 'Notes', 'Contact Methods', 'Last Contacted'];
+  const header = ['Full Name', 'Company', 'Job Title', 'School', 'Location', 'Tags', 'Notes', 'Contact Methods', 'Last Contacted'];
   const csvEscape = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const rows = active.map(c => [
     c.fullName || '',
+    c.company || '',
+    c.jobTitle || '',
+    c.school || '',
+    c.location || '',
     (c.tags || []).join('; '),
     c.notes || '',
     (c.contactMethods || []).map(h => h.value).join('; '),
@@ -437,7 +551,12 @@ function openContactModal(id) {
   
   if (els.frequencyInput) els.frequencyInput.value = contact?.frequencyGoalValue ?? '';
   if (els.frequencyUnitInput) els.frequencyUnitInput.value = contact?.frequencyGoalUnit ?? 'days';
-  
+
+  if (els.companyInput) els.companyInput.value = contact?.company || '';
+  if (els.jobTitleInput) els.jobTitleInput.value = contact?.jobTitle || '';
+  if (els.schoolInput) els.schoolInput.value = contact?.school || '';
+  if (els.locationInput) els.locationInput.value = contact?.location || '';
+
   if (els.notesInput) els.notesInput.value = contact?.notes || '';
   if (els.deleteContactBtn) els.deleteContactBtn.hidden = !contact;
 
@@ -473,6 +592,10 @@ function saveContactFromModal() {
     frequencyGoalValue: freqVal,
     frequencyGoalUnit: freqUnit,
     frequencyGoalDays: computedDays,
+    company: els.companyInput?.value.trim() || undefined,
+    jobTitle: els.jobTitleInput?.value.trim() || undefined,
+    school: els.schoolInput?.value.trim() || undefined,
+    location: els.locationInput?.value.trim() || undefined,
     lastContactedAt: window.state.interactionsDraft.length ? Math.max(...window.state.interactionsDraft.map(i => i.date)) : undefined,
     contactMethods: window.state.handleRowsDraft.filter((h) => h.value.trim()),
     relationships: window.state.relationRowsDraft,
@@ -575,7 +698,7 @@ function processVCardFile(file) {
     try {
       const parsed = VCardParser.parse(ev.target.result);
       if (!parsed || parsed.length === 0) throw new Error("No contacts found in vCard file.");
-      parsed.forEach(c => { c.id = uuid(); window.state.contacts.push(c); });
+      parsed.forEach(c => { c.id = uuid(); c.updatedAt = Date.now(); c.isDeleted = false; window.state.contacts.push(c); });
       saveAllToStorage(); renderDirectory();
       toast(`Imported ${parsed.length} contact(s)!`);
     } catch (err) { console.error(err); toast("Failed to parse vCard file."); }
@@ -612,15 +735,27 @@ document.addEventListener('DOMContentLoaded', () => {
   if (els.exportCsvBtn) els.exportCsvBtn.addEventListener('click', exportCsv);
 
   // Google Drive Handlers
+  updateDriveUI();
   if (els.gdriveLoginBtn) els.gdriveLoginBtn.addEventListener('click', async () => {
+    if (GoogleDrive.isSignedIn()) {
+      if (!confirm('Disconnect Google Drive? Your local contacts stay right where they are.')) return;
+      GoogleDrive.signOut();
+      localStorage.removeItem(DRIVE_CONNECTED_KEY);
+      updateDriveUI();
+      toast('Disconnected from Google Drive.');
+      return;
+    }
     try {
       await GoogleDrive.signIn();
+      localStorage.setItem(DRIVE_CONNECTED_KEY, 'true');
+      updateDriveUI();
       toast('Logged into Google Drive!');
-      els.gdriveLoginBtn.textContent = 'Drive: Authenticated';
-      handleDriveLoad();
+      await handleDriveLoad();
     } catch (e) { toast('Drive login failed: ' + e.message); console.error(e); }
   });
   if (els.gdriveSyncBtn) els.gdriveSyncBtn.addEventListener('click', handleDriveSync);
+  if (els.gdriveLoadBtn) els.gdriveLoadBtn.addEventListener('click', () => handleDriveLoad());
+  attemptSilentDriveLogin();
 
   // Merge Feature Handlers
   if (els.mergeContactsBtn) els.mergeContactsBtn.addEventListener('click', openMergeModal);

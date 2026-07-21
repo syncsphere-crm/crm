@@ -2,10 +2,15 @@
  * gdrive.js
  * Google OAuth (GIS token client) + Drive v3 sync against the hidden
  * `appDataFolder`, which is only ever visible to this app — not to the
- * user's normal Drive UI, and not to other apps.
+ * user's normal Drive UI, and not to other apps. It's tied to whichever
+ * Google account signs in, so it's naturally per-account, cross-device sync:
+ * sign in with the same account on another device/browser and the same
+ * appDataFolder file is there.
  *
- * Everything written to Drive is the already-encrypted envelope produced by
- * crypto.js. Google never sees plaintext.
+ * The backup envelope is encrypted (AES-256-GCM via crypto.js) only if the
+ * person sets a master password; otherwise it's uploaded as plain JSON.
+ * Google can still see it (this file lives in *your* Drive), but no other
+ * app or person can, since appDataFolder is private to this app.
  *
  * NOTE: Replace GOOGLE_CLIENT_ID below with your own OAuth 2.0 Web Client ID
  * from https://console.cloud.google.com/apis/credentials (Authorized
@@ -15,7 +20,7 @@
 const GoogleDrive = (() => {
   const GOOGLE_CLIENT_ID = '819054758887-dj9fhr71ci4e7jl8m6laf6ep4n1qabhh.apps.googleusercontent.com';
   const SCOPES = 'https://www.googleapis.com/auth/drive.appdata';
-  const BACKUP_FILENAME = 'crm_encrypted_backup.json';
+  const BACKUP_FILENAME = 'crm_encrypted_backup.json'; // legacy name kept for compatibility with existing backups
 
   let tokenClient = null;
   let accessToken = null;
@@ -62,6 +67,32 @@ const GoogleDrive = (() => {
         resolve(accessToken);
       };
       client.requestAccessToken({ prompt: isSignedIn() ? '' : 'consent' });
+    });
+  }
+
+  /**
+   * Attempts to restore a session WITHOUT showing any popup or prompt — used
+   * on page load so a returning, already-authorized person doesn't have to
+   * click "Login" again. Resolves false (never rejects) if there's no
+   * existing Google session or the person hasn't authorized this app before;
+   * that's an expected, silent outcome, not an error.
+   */
+  function trySilentSignIn() {
+    return new Promise((resolve) => {
+      if (!isConfigured() || typeof google === 'undefined') { resolve(false); return; }
+      const client = initTokenClient();
+      if (!client) { resolve(false); return; }
+      client.callback = (resp) => {
+        if (resp.error) { resolve(false); return; }
+        accessToken = resp.access_token;
+        tokenExpiresAt = Date.now() + (resp.expires_in ? resp.expires_in * 1000 : 3500 * 1000);
+        resolve(true);
+      };
+      try {
+        client.requestAccessToken({ prompt: 'none' });
+      } catch (e) {
+        resolve(false);
+      }
     });
   }
 
@@ -159,6 +190,7 @@ const GoogleDrive = (() => {
     isConfigured,
     isSignedIn,
     signIn,
+    trySilentSignIn,
     signOut,
     uploadBackup,
     downloadBackup,

@@ -82,7 +82,10 @@ const VCardParser = (() => {
           contact.notes = (contact.notes ? contact.notes + '\n' : '') + val;
           break;
         case 'ORG':
-          contact.tags.push(val.split(';')[0]);
+          contact.company = val.split(';')[0];
+          break;
+        case 'TITLE':
+          contact.jobTitle = val;
           break;
         case 'X-SOCIALPROFILE': {
           const typeParam = params.find((p) => p.toUpperCase().startsWith('TYPE'));

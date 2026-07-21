@@ -74,7 +74,7 @@
     <div class="topbar-row">
       <div class="brand">SyncSphere</div>
       <div class="search-wrap">
-        <div class="search-input-container">
+        <div class="search-input-container" id="searchInputContainer">
           <input type="search" id="globalSearch" class="search-input" placeholder="Search names, notes, tags…">
           <button type="button" id="aiToggleBtn" class="ai-toggle-btn" title="Toggle AI Semantic Search">✨</button>
         </div>
@@ -176,6 +176,14 @@
             </div>
           </div>
         </div>
+        <div class="form-row form-row-split">
+          <div><label>Company <span class="label-hint">(optional)</span></label><input type="text" id="companyInput" class="input" placeholder="e.g. Acme Corp"></div>
+          <div><label>Job title <span class="label-hint">(optional)</span></label><input type="text" id="jobTitleInput" class="input" placeholder="e.g. Product Designer"></div>
+        </div>
+        <div class="form-row form-row-split">
+          <div><label>School / College <span class="label-hint">(optional)</span></label><input type="text" id="schoolInput" class="input" placeholder="e.g. UC Berkeley"></div>
+          <div><label>Location <span class="label-hint">(optional)</span></label><input type="text" id="locationInput" class="input" placeholder="e.g. Austin, TX"></div>
+        </div>
         <div class="form-row"><label>Contact handles</label><div id="handleRows" class="dynamic-rows"></div><button type="button" id="addHandleBtn" class="btn btn-ghost btn-small">+ Add handle</button></div>
         <div class="form-row"><label>Relationships</label><div id="relationRows" class="dynamic-rows"></div><div class="relation-add"><select id="relationTargetSelect" class="select"></select><input type="text" id="relationLabelInput" class="input" placeholder="e.g. Sister"><button type="button" id="addRelationBtn" class="btn btn-ghost btn-small">+ Link</button></div></div>
         <div class="form-row"><label>Notes</label><textarea id="notesInput" class="input textarea" rows="4"></textarea></div>
@@ -227,9 +235,14 @@
     <div class="modal-body">
       <div class="settings-block" style="margin-bottom: 20px;">
         <p class="settings-label" style="font-weight:600; margin-bottom:8px;">Google Drive Sync</p>
-        <input type="password" id="masterPasswordInput" class="input" placeholder="Master Encryption Password" style="margin-bottom:8px;">
+        <p class="report-hint" style="margin-bottom:10px;">Signs in with your Google account and stores a backup in a hidden app folder in your own Drive — not visible in your normal Drive, and not accessible to other apps. Sign in with the same account on another device to pick up your contacts there too.</p>
+        <input type="password" id="masterPasswordInput" class="input" placeholder="Master password (optional — encrypts your backup)" style="margin-bottom:8px;">
+        <p class="report-hint" style="margin-bottom:10px;">Leave this blank to sync as plain JSON. Set a password to encrypt the backup — if you do, you'll need the same password on every device to load it, and there's no recovery if you forget it.</p>
         <button type="button" id="gdriveLoginBtn" class="btn btn-primary btn-block" style="margin-bottom:8px;">Login to Google Drive</button>
-        <button type="button" id="gdriveSyncBtn" class="btn btn-secondary btn-block">Sync Data to Drive</button>
+        <div style="display:flex; gap:8px;">
+          <button type="button" id="gdriveSyncBtn" class="btn btn-secondary" style="flex:1;">Save to Drive</button>
+          <button type="button" id="gdriveLoadBtn" class="btn btn-secondary" style="flex:1;">Load from Drive</button>
+        </div>
       </div>
       <hr style="border:none; border-top:1px solid #e2e8f0; margin:16px 0;">
       <div class="settings-block">
