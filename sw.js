@@ -12,13 +12,21 @@ const SHELL_FILES = [
   './crypto.js',
   './gdrive.js',
   './vcard.js',
+  './network.js',
+  './semantic-worker.js',
   './manifest.json',
   './icons/icon.svg',
 ];
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(SHELL_FILES)).catch(() => {})
+    caches.open(CACHE_NAME).then((cache) =>
+      Promise.all(
+        SHELL_FILES.map((file) =>
+          cache.add(file).catch((err) => console.warn(`sw.js: failed to precache ${file}`, err))
+        )
+      )
+    )
   );
   self.skipWaiting();
 });

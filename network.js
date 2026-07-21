@@ -76,16 +76,21 @@ window.renderNetworkMap = function(contacts) {
   // Pan/Zoom Events
   if (!canvas.dataset.mapped) {
     canvas.dataset.mapped = "true";
+    // Mouse events fire in CSS pixels, but canvas.width/height (and therefore
+    // offsetX/offsetY) are in device pixels scaled by devicePixelRatio. Without
+    // converting, dragging felt mismatched/too-slow on any Retina/high-DPI screen.
+    const dpr = () => window.devicePixelRatio || 1;
+
     canvas.addEventListener('mousedown', (e) => {
       isDragging = true;
-      startX = e.clientX - offsetX;
-      startY = e.clientY - offsetY;
+      startX = e.clientX * dpr() - offsetX;
+      startY = e.clientY * dpr() - offsetY;
     });
     window.addEventListener('mouseup', () => { isDragging = false; });
     window.addEventListener('mousemove', (e) => {
       if (!isDragging) return;
-      offsetX = e.clientX - startX;
-      offsetY = e.clientY - startY;
+      offsetX = e.clientX * dpr() - startX;
+      offsetY = e.clientY * dpr() - startY;
     });
     canvas.addEventListener('wheel', (e) => {
       e.preventDefault();
@@ -94,7 +99,13 @@ window.renderNetworkMap = function(contacts) {
 
     document.getElementById('zoomInBtn').addEventListener('click', () => zoom = Math.min(zoom + 0.2, 4));
     document.getElementById('zoomOutBtn').addEventListener('click', () => zoom = Math.max(zoom - 0.2, 0.2));
-    document.getElementById('resetZoomBtn').addEventListener('click', () => { zoom = 1.0; offsetX = width / 2; offsetY = height / 2; });
+    document.getElementById('resetZoomBtn').addEventListener('click', () => {
+      // Use the canvas's current size, not the size captured when this listener
+      // was first attached — otherwise Reset recenters to a stale, pre-resize point.
+      zoom = 1.0;
+      offsetX = canvas.width / 2;
+      offsetY = canvas.height / 2;
+    });
   }
 
   // Simulation Loop
