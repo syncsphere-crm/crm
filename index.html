@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rolodex — Personal CRM</title>
+<link rel="stylesheet" href="./styles.css">
+<style>
+  /* Extra styles for new features */
+  .search-wrap { display: flex; gap: 8px; flex: 1; max-width: 600px; }
+  .search-input { flex: 1; }
+  #networkCanvas { width: 100%; height: 600px; background: #fafafa; border: 1px solid #ddd; border-radius: 8px; cursor: grab; }
+  .interaction-actions { display: flex; gap: 8px; margin-top: 4px; }
+  .interaction-actions button { padding: 2px 8px; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<div id="appShell" class="app-shell">
+
+  <header class="topbar">
+    <div class="topbar-row">
+      <div class="brand">Rolodex</div>
+
+      <div class="search-wrap">
+        <input type="search" id="globalSearch" class="search-input" placeholder="Search names, notes, tags…">
+        <button type="button" id="aiSearchBtn" class="btn btn-secondary" title="Ask Local AI">✨ Ask AI</button>
+      </div>
+
+      <div class="topbar-actions">
+        <button type="button" id="settingsBtn" class="btn btn-icon" title="Settings">⚙️</button>
+      </div>
+    </div>
+
+    <nav class="tabbar">
+      <button type="button" class="tab active" data-view="directory">Directory</button>
+      <button type="button" class="tab" data-view="network">Network Map</button>
+      <button type="button" class="tab" data-view="reports">Reports</button>
+      <button type="button" class="tab" data-view="import">Import</button>
+    </nav>
+  </header>
+
+  <main class="main">
+
+    <!-- DIRECTORY VIEW -->
+    <section id="view-directory" class="view active">
+      <div class="filter-bar">
+        <select id="tagFilter" class="select"><option value="">All tags</option></select>
+        <button type="button" id="overdueFilterBtn" class="chip" data-active="false">Overdue reconnects</button>
+        <select id="relationFilter" class="select"><option value="">All relationships</option></select>
+        <div class="filter-spacer"></div>
+        <span id="resultCount" class="result-count"></span>
+        <button type="button" id="addContactBtn" class="btn btn-primary">+ New contact</button>
+      </div>
+
+      <div id="contactGrid" class="contact-grid"></div>
+      <div id="emptyState" class="empty-state" hidden>
+        <p>No contacts yet.</p>
+        <p class="empty-sub">Add your first person, or import contacts from a .vcf file.</p>
+      </div>
+    </section>
+
+    <!-- NETWORK MAP VIEW -->
+    <section id="view-network" class="view">
+      <div class="report-card report-card-wide">
+        <h3>Connection Graph</h3>
+        <p class="report-hint">Visualizing how your network is linked together.</p>
+        <canvas id="networkCanvas" width="800" height="600"></canvas>
+      </div>
+    </section>
+
+    <!-- REPORTS VIEW -->
+    <section id="view-reports" class="view">
+      <div class="report-grid">
+        <div class="report-card"><h3>Overdue reconnects</h3><div id="reportOverdue" class="report-list"></div></div>
+        <div class="report-card"><h3>Tag distribution</h3><div id="reportTags" class="report-list"></div></div>
+        <div class="report-card report-card-wide">
+          <h3>Export</h3>
+          <div class="export-row">
+            <button type="button" id="exportRawBtn" class="btn btn-secondary">Download JSON</button>
+            <button type="button" id="exportCsvBtn" class="btn btn-secondary">Download CSV</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- IMPORT VIEW -->
+    <section id="view-import" class="view">
+      <div class="import-card">
+        <h3>Import from vCard (.vcf)</h3>
+        <div id="dropZone" class="drop-zone">
+          <p>Drag & drop .vcf files here</p>
+          <label class="btn btn-secondary file-label">
+            Choose file
+            <input type="file" id="vcfInput" accept=".vcf,text/vcard" hidden>
+          </label>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<!-- CONTACT EDIT MODAL -->
+<div id="contactModal" class="modal-backdrop" hidden>
+  <div class="modal modal-large">
+    <div class="modal-header">
+      <h2 id="contactModalTitle">New contact</h2>
+      <button type="button" class="modal-close" data-close="contactModal">&times;</button>
+    </div>
+    <div class="modal-body">
+      <form id="contactForm">
+        <input type="hidden" id="contactId">
+
+        <div class="form-row">
+          <label for="fullNameInput">Full name</label>
+          <input type="text" id="fullNameInput" class="input" required placeholder="Jane Doe">
+        </div>
+
+        <div class="form-row form-row-split">
+          <div><label for="tagsInput">Tags (comma separated)</label><input type="text" id="tagsInput" class="input"></div>
+          <div><label for="frequencyInput">Reconnect goal (days)</label><input type="number" id="frequencyInput" class="input"></div>
+        </div>
+
+        <div class="form-row">
+          <label>Contact handles</label>
+          <div id="handleRows" class="dynamic-rows"></div>
+          <button type="button" id="addHandleBtn" class="btn btn-ghost btn-small">+ Add handle</button>
+        </div>
+
+        <div class="form-row">
+          <label>Relationships</label>
+          <div id="relationRows" class="dynamic-rows"></div>
+          <div class="relation-add">
+            <select id="relationTargetSelect" class="select"></select>
+            <input type="text" id="relationLabelInput" class="input" placeholder="e.g. Sister, Co-founder">
+            <button type="button" id="addRelationBtn" class="btn btn-ghost btn-small">+ Link</button>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <label for="notesInput">Notes</label>
+          <textarea id="notesInput" class="input textarea" rows="4"></textarea>
+        </div>
+
+        <div class="form-row">
+          <div class="row-between">
+            <label>Interaction history</label>
+            <button type="button" id="addInteractionBtn" class="btn btn-ghost btn-small">+ Log interaction</button>
+          </div>
+          <div id="interactionList" class="interaction-list"></div>
+        </div>
+      </form>
+    </div>
+    <div class="modal-footer">
+      <button type="button" id="deleteContactBtn" class="btn btn-danger" hidden>Delete</button>
+      <div class="modal-footer-spacer"></div>
+      <button type="button" class="btn btn-ghost" data-close="contactModal">Cancel</button>
+      <button type="button" id="saveContactBtn" class="btn btn-primary">Save contact</button>
+    </div>
+  </div>
+</div>
+
+<!-- QUICK INTERACTION MODAL -->
+<div id="interactionModal" class="modal-backdrop" hidden>
+  <div class="modal modal-small">
+    <div class="modal-header">
+      <h2>Log interaction</h2>
+      <button type="button" class="modal-close" data-close="interactionModal">&times;</button>
+    </div>
+    <div class="modal-body">
+      <input type="hidden" id="quickInteractionContactId">
+      <div class="form-row">
+        <label for="quickChannelInput">Channel</label>
+        <input type="text" id="quickChannelInput" class="input" placeholder="Coffee, Call, Discord…">
+      </div>
+      <div class="form-row">
+        <label for="quickSummaryInput">Summary</label>
+        <textarea id="quickSummaryInput" class="input textarea" rows="3"></textarea>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <div class="modal-footer-spacer"></div>
+      <button type="button" class="btn btn-ghost" data-close="interactionModal">Cancel</button>
+      <button type="button" id="saveQuickInteractionBtn" class="btn btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- SETTINGS MODAL -->
+<div id="settingsModal" class="modal-backdrop" hidden>
+  <div class="modal modal-small">
+    <div class="modal-header"><h2>Settings</h2><button type="button" class="modal-close" data-close="settingsModal">&times;</button></div>
+    <div class="modal-body">
+      <div class="settings-block"><p class="settings-label">Danger zone</p><button type="button" id="wipeLocalBtn" class="btn btn-danger btn-block">Erase local data</button></div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+<script src="./app.js"></script>
+</body>
+</html>
