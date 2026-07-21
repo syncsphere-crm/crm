@@ -1,14 +1,23 @@
+/**
+ * app.js - Core UI, Storage, PFP logic, SyncSphere Integrations, and Semantic Worker
+ */
 const STORAGE_KEY = 'syncsphere_contacts_v1';
 
 window.state = {
   contacts: [],
   activeView: 'directory',
+  tagFilter: '',
+  relationFilter: '',
+  overdueOnly: false,
   searchQuery: '',
   handleRowsDraft: [],
   relationRowsDraft: [],
   interactionsDraft: [],
   pendingPfpBase64: null,
 };
+
+let semanticWorker = null;
+let isWorkerIndexing = false;
 
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11));
 
@@ -24,18 +33,21 @@ function toast(msg, ms = 3000) {
 const els = {};
 function cacheEls() {
   const ids = [
-    'globalSearch','settingsBtn','contactGrid','emptyState',
-    'resultCount','addContactBtn', 'authDriveBtn', 'syncDriveBtn',
-    'contactModal', 'contactModalTitle','contactId','fullNameInput','tagsInput',
-    'frequencyInput', 'frequencyUnit', 'handleRows','addHandleBtn',
-    'relationRows','relationTargetSelect','relationLabelInput',
+    'globalSearch','settingsBtn','contactGrid','emptyState','tagFilter',
+    'overdueFilterBtn','relationFilter','resultCount','addContactBtn','reportOverdue',
+    'reportTags','exportRawBtn','exportCsvBtn','dropZone','vcfInput','contactModal',
+    'contactModalTitle','contactId','fullNameInput','tagsInput','frequencyInput', 'frequencyUnitInput',
+    'handleRows','addHandleBtn','relationRows','relationTargetSelect','relationLabelInput',
     'addRelationBtn','notesInput','addInteractionBtn','interactionList','deleteContactBtn',
     'saveContactBtn','interactionModal','quickInteractionContactId','quickChannelInput',
     'quickSummaryInput','saveQuickInteractionBtn','settingsModal','wipeLocalBtn',
     'pfpInput', 'pfpPreview', 'pfpImg', 'pfpInitial', 'removePfpBtn',
-    'importVcfBtn', 'vcfInput', 'masterPassword'
+    'gdriveLoginBtn', 'gdriveSyncBtn', 'masterPasswordInput', 'aiSearchBtn', 'aiStatus',
+    'mergeContactsBtn', 'mergeModal', 'mergePrimarySelect', 'mergeSecondarySelect', 'confirmMergeBtn'
   ];
-  ids.forEach((id) => { els[id] = document.getElementById(id); });
+  ids.forEach((id) => { 
+    els[id] = document.getElementById(id); 
+  });
 }
 
 // --- Storage & Sync ---
@@ -48,85 +60,138 @@ function loadAllFromStorage() {
 
 function saveAllToStorage() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(window.state.contacts));
-  syncToDrive(); // Auto-sync triggered on save
+  indexSemanticSearch();
 }
 
-// Drive Sync Logic
-async function syncToDrive() {
-  if (!GoogleDrive.isSignedIn()) return;
-  const pw = els.masterPassword.value;
-  if (!pw) return toast("Set a master password in settings to sync.");
-  
+async function handleDriveSync() {
+  const pwd = els.masterPasswordInput.value;
+  if (!pwd) return toast('Master password required for encryption.');
+  if (!GoogleDrive.isSignedIn()) return toast('Please login to Google Drive first.');
+
   try {
-    if (!CryptoEngine.isUnlocked()) {
-      if (CryptoEngine.hasExistingVault()) {
-        const ok = await CryptoEngine.unlockVault(pw);
-        if(!ok) return toast("Invalid Master Password.");
-      } else {
-        await CryptoEngine.initializeVault(pw);
-      }
+    toast('Encrypting and syncing...');
+    if (!CryptoEngine.hasExistingVault()) {
+      await CryptoEngine.initializeVault(pwd);
+    } else {
+      const unlocked = await CryptoEngine.unlockVault(pwd);
+      if (!unlocked) return toast('Invalid master password.');
     }
-    els.syncDriveBtn.textContent = "Syncing...";
-    const encrypted = await CryptoEngine.encrypt(window.state.contacts);
-    await GoogleDrive.uploadBackup(encrypted);
-    toast("Synced to Drive.");
-  } catch(e) {
-    console.error(e);
-    toast("Sync failed.");
-  } finally {
-    els.syncDriveBtn.textContent = "Sync Data";
+
+    const payload = await CryptoEngine.encrypt(window.state.contacts);
+    await GoogleDrive.uploadBackup(payload);
+    toast('Successfully synced to Google Drive!');
+  } catch (err) {
+    console.error(err);
+    toast('Sync failed. Check console.');
   }
 }
 
-async function pullFromDrive() {
-  if (!GoogleDrive.isSignedIn()) return;
-  const pw = els.masterPassword.value;
-  if (!pw) return toast("Set a master password in settings to decrypt.");
-  
+async function handleDriveLoad() {
+  const pwd = els.masterPasswordInput.value;
+  if (!pwd) return toast('Master password required for decryption.');
+  if (!GoogleDrive.isSignedIn()) return toast('Please login to Google Drive first.');
+
   try {
-     if (!CryptoEngine.isUnlocked()) {
-      if (CryptoEngine.hasExistingVault()) {
-        const ok = await CryptoEngine.unlockVault(pw);
-        if(!ok) return toast("Invalid Master Password.");
-      } else {
-        await CryptoEngine.initializeVault(pw);
-      }
+    toast('Downloading and decrypting...');
+    const payload = await GoogleDrive.downloadBackup();
+    if (!payload) return toast('No backup found on Drive.');
+
+    if (!CryptoEngine.hasExistingVault()) {
+       await CryptoEngine.initializeVault(pwd);
+    } else {
+       const unlocked = await CryptoEngine.unlockVault(pwd);
+       if (!unlocked) return toast('Invalid master password.');
     }
-    const backup = await GoogleDrive.downloadBackup();
-    if (backup) {
-      const data = await CryptoEngine.decrypt(backup);
-      window.state.contacts = data;
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+
+    const decrypted = await CryptoEngine.decrypt(payload);
+    if (decrypted && Array.isArray(decrypted)) {
+      window.state.contacts = decrypted;
+      saveAllToStorage();
       renderDirectory();
-      toast("Restored from Drive.");
+      toast('Data loaded from Google Drive!');
     }
-  } catch(e) {
-    console.error(e);
-    toast("Restore failed.");
+  } catch (err) {
+    console.error(err);
+    toast('Load failed. Password might be wrong.');
   }
 }
-
 
 // --- Helpers ---
+function isOverdue(c) {
+  if (!c.frequencyGoalDays || !c.lastContactedAt) return false;
+  return ((Date.now() - c.lastContactedAt) / 86400000) > c.frequencyGoalDays;
+}
+
 function initials(name) {
   return (name || '?').trim().split(/\s+/).slice(0, 2).map((p) => p[0]?.toUpperCase() || '').join('') || '?';
 }
+
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// --- Rendering ---
-function renderDirectory() {
-  let list = window.state.contacts.filter(c => !c.isDeleted);
-  const q = window.state.searchQuery.toLowerCase();
+// --- Semantic Search System ---
+function initSemanticWorker() {
+  if (semanticWorker) return;
+  try {
+    semanticWorker = new Worker('./semantic-worker.js');
+    semanticWorker.onmessage = (e) => {
+      const { type, results } = e.data;
+      if (type === 'index-complete') {
+        isWorkerIndexing = false;
+        if (els.aiStatus) els.aiStatus.textContent = '';
+      } else if (type === 'query-result') {
+        const matchingIds = new Set(results.filter(r => r.score > 0.25).map(r => r.id));
+        renderDirectoryWithFilter((c) => matchingIds.has(c.id));
+        if (els.aiStatus) els.aiStatus.textContent = `Found ${matchingIds.size} semantic matches`;
+      }
+    };
+  } catch (err) {
+    console.warn("Semantic worker could not be initialized:", err);
+  }
+}
+
+function indexSemanticSearch() {
+  if (!semanticWorker) initSemanticWorker();
+  if (!semanticWorker) return;
   
-  if (q) list = list.filter(c => c.fullName?.toLowerCase().includes(q) || c.notes?.toLowerCase().includes(q) || (c.tags || []).some(t => t.toLowerCase().includes(q)));
+  isWorkerIndexing = true;
+  const docs = window.state.contacts.filter(c => !c.isDeleted).map(c => ({
+    id: c.id,
+    text: `Name: ${c.fullName}. Tags: ${(c.tags||[]).join(' ')}. Notes: ${c.notes || ''}`
+  }));
+  
+  semanticWorker.postMessage({ type: 'index', payload: docs, requestId: Date.now() });
+}
+
+function executeAISearch() {
+  const query = els.globalSearch.value.trim();
+  if (!query) return renderDirectory();
+  
+  if (!semanticWorker) initSemanticWorker();
+  if (els.aiStatus) els.aiStatus.textContent = "Searching vectors...";
+  semanticWorker.postMessage({ type: 'query', payload: { text: query, topK: 20 }, requestId: Date.now() });
+}
+
+// --- Rendering ---
+function renderDirectoryWithFilter(customFilter = null) {
+  let list = window.state.contacts.filter(c => !c.isDeleted);
+  
+  if (customFilter) {
+    list = list.filter(customFilter);
+  } else {
+    const q = window.state.searchQuery.toLowerCase();
+    if (q) list = list.filter(c => c.fullName?.toLowerCase().includes(q) || c.notes?.toLowerCase().includes(q) || (c.tags || []).some(t => t.toLowerCase().includes(q)));
+    if (window.state.tagFilter) list = list.filter(c => (c.tags || []).includes(window.state.tagFilter));
+    if (window.state.overdueOnly) list = list.filter(isOverdue);
+    if (window.state.relationFilter) list = list.filter(c => (c.relationships || []).some(r => r.targetContactId === window.state.relationFilter));
+  }
   
   list.sort((a, b) => a.fullName.localeCompare(b.fullName));
   
-  els.resultCount.textContent = `${list.length} contacts`;
-  els.contactGrid.innerHTML = '';
-  els.emptyState.hidden = list.length > 0;
+  if (els.resultCount) els.resultCount.textContent = `${list.length} contacts`;
+  if (els.contactGrid) els.contactGrid.innerHTML = '';
+  if (els.emptyState) els.emptyState.hidden = list.length > 0;
 
   for (const c of list) {
     const card = document.createElement('div');
@@ -151,52 +216,81 @@ function renderDirectory() {
       openContactModal(c.id);
     });
     card.querySelector('[data-log-id]').addEventListener('click', () => openInteractionModal(c.id));
-    els.contactGrid.appendChild(card);
+    if (els.contactGrid) els.contactGrid.appendChild(card);
   }
+}
+
+function renderDirectory() {
+  renderDirectoryWithFilter(null);
 }
 
 // --- PFP Logic ---
 function updatePfpUI() {
   if (window.state.pendingPfpBase64) {
-    els.pfpImg.src = window.state.pendingPfpBase64;
-    els.pfpImg.hidden = false;
-    els.pfpInitial.hidden = true;
-    els.removePfpBtn.hidden = false;
+    if (els.pfpImg) { els.pfpImg.src = window.state.pendingPfpBase64; els.pfpImg.hidden = false; }
+    if (els.pfpInitial) els.pfpInitial.hidden = true;
+    if (els.removePfpBtn) els.removePfpBtn.hidden = false;
   } else {
-    els.pfpImg.hidden = true;
-    els.pfpInitial.hidden = false;
-    els.pfpInitial.textContent = initials(els.fullNameInput.value || '?');
-    els.removePfpBtn.hidden = true;
+    if (els.pfpImg) els.pfpImg.hidden = true;
+    if (els.pfpInitial) { els.pfpInitial.hidden = false; els.pfpInitial.textContent = initials(els.fullNameInput?.value || '?'); }
+    if (els.removePfpBtn) els.removePfpBtn.hidden = true;
   }
+}
+
+// --- Merge Contacts System ---
+function openMergeModal() {
+  const activeContacts = window.state.contacts.filter(c => !c.isDeleted);
+  if (activeContacts.length < 2) return toast("Need at least 2 contacts to merge.");
+
+  const options = activeContacts.map(c => `<option value="${c.id}">${escapeHtml(c.fullName)}</option>`).join('');
+  els.mergePrimarySelect.innerHTML = options;
+  els.mergeSecondarySelect.innerHTML = options;
+  if (activeContacts.length > 1) els.mergeSecondarySelect.selectedIndex = 1;
+
+  els.mergeModal.hidden = false;
+}
+
+function executeMerge() {
+  const pId = els.mergePrimarySelect.value;
+  const sId = els.mergeSecondarySelect.value;
+  if (pId === sId) return toast("Primary and Secondary contact must be different.");
+
+  const primary = window.state.contacts.find(c => c.id === pId);
+  const secondary = window.state.contacts.find(c => c.id === sId);
+  if (!primary || !secondary) return;
+
+  // Combine properties
+  primary.tags = Array.from(new Set([...(primary.tags || []), ...(secondary.tags || [])]));
+  primary.contactMethods = [...(primary.contactMethods || []), ...(secondary.contactMethods || [])];
+  primary.interactions = [...(primary.interactions || []), ...(secondary.interactions || [])];
+  primary.relationships = [...(primary.relationships || []), ...(secondary.relationships || [])];
+  
+  if (secondary.notes) {
+    primary.notes = (primary.notes ? primary.notes + '\n\n' : '') + `[Merged Note from ${secondary.fullName}]:\n` + secondary.notes;
+  }
+
+  // Soft delete secondary
+  secondary.isDeleted = true;
+
+  saveAllToStorage();
+  renderDirectory();
+  els.mergeModal.hidden = true;
+  toast(`Merged ${secondary.fullName} into ${primary.fullName}`);
 }
 
 // --- Modals ---
 function openContactModal(id) {
   const contact = id ? window.state.contacts.find((c) => c.id === id) : null;
-  els.contactModalTitle.textContent = contact ? 'Edit contact' : 'New contact';
-  els.contactId.value = id || '';
-  els.fullNameInput.value = contact?.fullName || '';
-  els.tagsInput.value = (contact?.tags || []).join(', ');
+  if (els.contactModalTitle) els.contactModalTitle.textContent = contact ? 'Edit contact' : 'New contact';
+  if (els.contactId) els.contactId.value = id || '';
+  if (els.fullNameInput) els.fullNameInput.value = contact?.fullName || '';
+  if (els.tagsInput) els.tagsInput.value = (contact?.tags || []).join(', ');
   
-  // Handle frequency parsing back from days to UI
-  if (contact?.frequencyGoalDays) {
-     if (contact.frequencyGoalDays % 30 === 0) {
-        els.frequencyInput.value = contact.frequencyGoalDays / 30;
-        els.frequencyUnit.value = "30";
-     } else if (contact.frequencyGoalDays % 7 === 0) {
-        els.frequencyInput.value = contact.frequencyGoalDays / 7;
-        els.frequencyUnit.value = "7";
-     } else {
-        els.frequencyInput.value = contact.frequencyGoalDays;
-        els.frequencyUnit.value = "1";
-     }
-  } else {
-     els.frequencyInput.value = '';
-     els.frequencyUnit.value = "1";
-  }
-
-  els.notesInput.value = contact?.notes || '';
-  els.deleteContactBtn.hidden = !contact;
+  if (els.frequencyInput) els.frequencyInput.value = contact?.frequencyGoalValue ?? '';
+  if (els.frequencyUnitInput) els.frequencyUnitInput.value = contact?.frequencyGoalUnit ?? 'days';
+  
+  if (els.notesInput) els.notesInput.value = contact?.notes || '';
+  if (els.deleteContactBtn) els.deleteContactBtn.hidden = !contact;
 
   window.state.pendingPfpBase64 = contact?.pfpBase64 || null;
   updatePfpUI();
@@ -206,8 +300,8 @@ function openContactModal(id) {
   window.state.interactionsDraft = contact ? JSON.parse(JSON.stringify(contact.interactions || [])) : [];
 
   renderHandleRows(); renderRelationRows(); renderInteractionList();
-  els.relationTargetSelect.innerHTML = window.state.contacts.filter(c => !c.isDeleted && c.id !== id).map(c => `<option value="${c.id}">${escapeHtml(c.fullName)}</option>`).join('');
-  els.contactModal.hidden = false;
+  if (els.relationTargetSelect) els.relationTargetSelect.innerHTML = window.state.contacts.filter(c => !c.isDeleted && c.id !== id).map(c => `<option value="${c.id}">${escapeHtml(c.fullName)}</option>`).join('');
+  if (els.contactModal) els.contactModal.hidden = false;
 }
 
 function saveContactFromModal() {
@@ -215,15 +309,21 @@ function saveContactFromModal() {
   const fullName = els.fullNameInput.value.trim();
   if (!fullName) return toast('Name required.');
 
-  // Calculate days
-  const freqVal = els.frequencyInput.value ? Number(els.frequencyInput.value) : 0;
-  const freqMulti = Number(els.frequencyUnit.value);
-  const totalDays = freqVal > 0 ? freqVal * freqMulti : undefined;
+  const freqVal = els.frequencyInput.value ? Number(els.frequencyInput.value) : undefined;
+  const freqUnit = els.frequencyUnitInput.value;
+  let computedDays = undefined;
+  if (freqVal) {
+    if (freqUnit === 'weeks') computedDays = freqVal * 7;
+    else if (freqUnit === 'months') computedDays = freqVal * 30;
+    else computedDays = freqVal;
+  }
 
   const contact = {
     id, fullName,
     pfpBase64: window.state.pendingPfpBase64,
-    frequencyGoalDays: totalDays,
+    frequencyGoalValue: freqVal,
+    frequencyGoalUnit: freqUnit,
+    frequencyGoalDays: computedDays,
     lastContactedAt: window.state.interactionsDraft.length ? Math.max(...window.state.interactionsDraft.map(i => i.date)) : undefined,
     contactMethods: window.state.handleRowsDraft.filter((h) => h.value.trim()),
     relationships: window.state.relationRowsDraft,
@@ -239,23 +339,27 @@ function saveContactFromModal() {
 
   saveAllToStorage(); renderDirectory();
   els.contactModal.hidden = true;
-  indexSemanticSearch(); // Update search indices
   if (window.state.activeView === 'network' && window.renderNetworkMap) window.renderNetworkMap(window.state.contacts);
 }
 
 function renderHandleRows() {
-  els.handleRows.innerHTML = window.state.handleRowsDraft.map((h, idx) => `<div class="dynamic-row"><input class="input handle-input" data-idx="${idx}" value="${escapeHtml(h.value)}" placeholder="Value"><button type="button" class="row-remove" data-remove-handle="${idx}">&times;</button></div>`).join('');
+  if(!els.handleRows) return;
+  els.handleRows.innerHTML = window.state.handleRowsDraft.map((h, idx) => `<div class="dynamic-row" style="display:flex; gap:8px; margin-bottom:4px;"><input class="input handle-input" data-idx="${idx}" value="${escapeHtml(h.value)}" placeholder="Value"><button type="button" class="row-remove btn btn-ghost" data-remove-handle="${idx}">&times;</button></div>`).join('');
   els.handleRows.querySelectorAll('.handle-input').forEach(el => el.addEventListener('input', e => window.state.handleRowsDraft[e.target.dataset.idx].value = e.target.value));
   els.handleRows.querySelectorAll('[data-remove-handle]').forEach(btn => btn.addEventListener('click', () => { window.state.handleRowsDraft.splice(+btn.dataset.removeHandle, 1); renderHandleRows(); }));
 }
+
 function renderRelationRows() {
-  els.relationRows.innerHTML = window.state.relationRowsDraft.map((r, idx) => `<div class="dynamic-row"><span style="flex:1;">${escapeHtml(r.label)}</span><button type="button" class="row-remove" data-remove-relation="${idx}">&times;</button></div>`).join('');
+  if(!els.relationRows) return;
+  els.relationRows.innerHTML = window.state.relationRowsDraft.map((r, idx) => `<div class="dynamic-row" style="display:flex; gap:8px; margin-bottom:4px;"><span style="flex:1;">${escapeHtml(r.label)}</span><button type="button" class="row-remove btn btn-ghost" data-remove-relation="${idx}">&times;</button></div>`).join('');
   els.relationRows.querySelectorAll('[data-remove-relation]').forEach(btn => btn.addEventListener('click', () => { window.state.relationRowsDraft.splice(+btn.dataset.removeRelation, 1); renderRelationRows(); }));
 }
+
 function renderInteractionList() {
+  if(!els.interactionList) return;
   els.interactionList.innerHTML = [...window.state.interactionsDraft].sort((a,b) => b.date - a.date).map(i => `
-    <div class="interaction-item">
-      <div class="interaction-meta"><span>${escapeHtml(i.channel)}</span></div>
+    <div class="interaction-item" style="border:1px solid #e2e8f0; padding:8px; border-radius:6px; margin-bottom:6px;">
+      <div class="interaction-meta"><strong>${escapeHtml(i.channel)}</strong></div>
       <div class="interaction-summary">${escapeHtml(i.summary)}</div>
       <div class="interaction-actions">
         <button class="btn btn-secondary btn-small" data-edit-i="${i.id}">Edit</button>
@@ -275,68 +379,78 @@ function saveQuickInteraction() {
   saveAllToStorage(); renderDirectory(); els.interactionModal.hidden = true;
 }
 
-// Semantic Search Setup
-const semanticWorker = new Worker('semantic-worker.js');
-semanticWorker.onmessage = (e) => {
-  if (e.data.type === 'query-result') {
-      const topIds = e.data.results.map(r => r.id);
-      window.state.contacts.forEach(c => {
-         // Sort directory by semantic scores if available
-         c._searchScore = topIds.indexOf(c.id);
-      });
-      renderDirectory();
-  }
-};
-function indexSemanticSearch() {
-  const payload = window.state.contacts.map(c => ({ id: c.id, text: `${c.fullName} ${c.notes} ${(c.tags||[]).join(' ')}` }));
-  semanticWorker.postMessage({ type: 'index', payload });
+// --- Process Imported vCards ---
+function processVCardFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (ev) => { 
+    try {
+      const parsed = VCardParser.parse(ev.target.result);
+      parsed.forEach(c => { c.id = uuid(); window.state.contacts.push(c); });
+      saveAllToStorage(); renderDirectory();
+      toast(`Imported ${parsed.length} contacts!`);
+    } catch (err) { console.error(err); toast("Failed to parse vCard."); }
+  };
+  reader.readAsText(file);
 }
 
 // --- Init & Events ---
 document.addEventListener('DOMContentLoaded', () => {
   cacheEls(); loadAllFromStorage(); renderDirectory(); indexSemanticSearch();
 
-  els.globalSearch.addEventListener('input', (e) => {
-    window.state.searchQuery = e.target.value;
-    if (window.state.searchQuery.length > 3) {
-       semanticWorker.postMessage({ type: 'query', payload: { text: window.state.searchQuery, topK: 10 } });
-    }
-    renderDirectory();
-  });
-
-  els.settingsBtn.addEventListener('click', () => { els.settingsModal.hidden = false; });
-  els.wipeLocalBtn.addEventListener('click', () => {
+  if (els.settingsBtn) els.settingsBtn.addEventListener('click', () => { els.settingsModal.hidden = false; });
+  if (els.wipeLocalBtn) els.wipeLocalBtn.addEventListener('click', () => {
     if(!confirm("Erase EVERYTHING?")) return;
     localStorage.removeItem(STORAGE_KEY); window.state.contacts = [];
     renderDirectory(); els.settingsModal.hidden = true; toast("Erased.");
   });
 
-  // VCF Import
-  els.importVcfBtn.addEventListener('click', () => els.vcfInput.click());
-  els.vcfInput.addEventListener('change', (e) => {
-     const file = e.target.files[0];
-     if(!file) return;
-     const reader = new FileReader();
-     reader.onload = (ev) => {
-         const parsed = VCardParser.parse(ev.target.result);
-         parsed.forEach(p => { p.id = uuid(); window.state.contacts.push(p); });
-         saveAllToStorage(); renderDirectory(); toast(`Imported ${parsed.length} contacts.`);
-     };
-     reader.readAsText(file);
+  // Search
+  if (els.globalSearch) els.globalSearch.addEventListener('input', (e) => {
+    window.state.searchQuery = e.target.value;
+    renderDirectory();
   });
+  if (els.aiSearchBtn) els.aiSearchBtn.addEventListener('click', executeAISearch);
+
+  // GDrive Login & Sync Handlers
+  if (els.gdriveLoginBtn) els.gdriveLoginBtn.addEventListener('click', async () => {
+    try {
+      await GoogleDrive.signIn();
+      toast('Logged into Google Drive!');
+      els.gdriveLoginBtn.textContent = 'Drive: Authenticated';
+      handleDriveLoad();
+    } catch (e) { toast('Drive login failed.'); console.error(e); }
+  });
+  if (els.gdriveSyncBtn) els.gdriveSyncBtn.addEventListener('click', handleDriveSync);
+
+  // Merge Feature Handlers
+  if (els.mergeContactsBtn) els.mergeContactsBtn.addEventListener('click', openMergeModal);
+  if (els.confirmMergeBtn) els.confirmMergeBtn.addEventListener('click', executeMerge);
+
+  // File Upload and Dropzone Handlers
+  if (els.vcfInput) els.vcfInput.addEventListener('change', (e) => processVCardFile(e.target.files[0]));
+  if (els.dropZone) {
+    els.dropZone.addEventListener('dragover', (e) => { e.preventDefault(); els.dropZone.classList.add('drag-over'); });
+    els.dropZone.addEventListener('dragleave', () => els.dropZone.classList.remove('drag-over'));
+    els.dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      els.dropZone.classList.remove('drag-over');
+      if (e.dataTransfer.files.length) processVCardFile(e.dataTransfer.files[0]);
+    });
+  }
 
   // PFP File Reader
-  els.pfpInput.addEventListener('change', (e) => {
+  if (els.pfpInput) els.pfpInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => { window.state.pendingPfpBase64 = ev.target.result; updatePfpUI(); };
     reader.readAsDataURL(file);
   });
-  els.removePfpBtn.addEventListener('click', () => { window.state.pendingPfpBase64 = null; updatePfpUI(); els.pfpInput.value = ''; });
-  els.fullNameInput.addEventListener('input', updatePfpUI);
+  if (els.removePfpBtn) els.removePfpBtn.addEventListener('click', () => { window.state.pendingPfpBase64 = null; updatePfpUI(); els.pfpInput.value = ''; });
+  if (els.fullNameInput) els.fullNameInput.addEventListener('input', updatePfpUI);
 
-  // Tabs
+  // Navigation Tabs
   document.querySelectorAll('.tab').forEach((tab) => {
     tab.addEventListener('click', () => {
       document.querySelectorAll('.tab, .view').forEach(t => t.classList.remove('active'));
@@ -348,29 +462,15 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // Basic events
-  els.addContactBtn.addEventListener('click', () => openContactModal(null));
-  els.saveContactBtn.addEventListener('click', saveContactFromModal);
-  els.addHandleBtn.addEventListener('click', () => { window.state.handleRowsDraft.push({ value: '' }); renderHandleRows(); });
-  els.addRelationBtn.addEventListener('click', () => { window.state.relationRowsDraft.push({ targetContactId: els.relationTargetSelect.value, label: els.relationLabelInput.value }); renderRelationRows(); });
-  els.addInteractionBtn.addEventListener('click', () => { window.state.interactionsDraft.push({ id: uuid(), date: Date.now(), channel: 'Note', summary: '' }); renderInteractionList(); });
-  els.saveQuickInteractionBtn.addEventListener('click', saveQuickInteraction);
-  els.deleteContactBtn.addEventListener('click', () => { if(confirm('Delete?')) { window.state.contacts.find(c => c.id === els.contactId.value).isDeleted = true; saveAllToStorage(); renderDirectory(); els.contactModal.hidden = true; }});
+  // Modal Actions
+  if (els.addContactBtn) els.addContactBtn.addEventListener('click', () => openContactModal(null));
+  if (els.saveContactBtn) els.saveContactBtn.addEventListener('click', saveContactFromModal);
+  if (els.addHandleBtn) els.addHandleBtn.addEventListener('click', () => { window.state.handleRowsDraft.push({ value: '' }); renderHandleRows(); });
+  if (els.addRelationBtn) els.addRelationBtn.addEventListener('click', () => { window.state.relationRowsDraft.push({ targetContactId: els.relationTargetSelect.value, label: els.relationLabelInput.value }); renderRelationRows(); });
+  if (els.addInteractionBtn) els.addInteractionBtn.addEventListener('click', () => { window.state.interactionsDraft.push({ id: uuid(), date: Date.now(), channel: 'Note', summary: '' }); renderInteractionList(); });
+  if (els.saveQuickInteractionBtn) els.saveQuickInteractionBtn.addEventListener('click', saveQuickInteraction);
+  if (els.deleteContactBtn) els.deleteContactBtn.addEventListener('click', () => { if(confirm('Delete?')) { window.state.contacts.find(c => c.id === els.contactId.value).isDeleted = true; saveAllToStorage(); renderDirectory(); els.contactModal.hidden = true; }});
   
-  els.authDriveBtn.addEventListener('click', async () => {
-     try {
-       await GoogleDrive.signIn();
-       els.authDriveBtn.hidden = true;
-       els.syncDriveBtn.hidden = false;
-       toast("Connected to Google Drive");
-       pullFromDrive();
-     } catch (e) {
-       toast("Drive auth failed");
-     }
-  });
-
-  els.syncDriveBtn.addEventListener('click', syncToDrive);
-
   document.querySelectorAll('[data-close]').forEach(btn => btn.addEventListener('click', () => document.getElementById(btn.dataset.close).hidden = true));
   document.querySelectorAll('.modal-backdrop').forEach(b => b.addEventListener('mousedown', e => { if (e.target === b) b.hidden = true; }));
 });

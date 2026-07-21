@@ -1,205 +1,236 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>SyncSphere CRM</title>
-  <link rel="stylesheet" href="styles.css">
-  <link rel="manifest" href="manifest.json">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SyncSphere — Personal CRM</title>
+<link rel="stylesheet" href="./styles.css">
+<style>
+  * { transition: background-color 0.15s ease, border-color 0.15s ease; }
+  
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes modalPop { 
+    from { opacity: 0; transform: scale(0.95) translateY(10px); } 
+    to { opacity: 1; transform: scale(1) translateY(0); } 
+  }
+
+  .view.active { animation: fadeIn 0.3s ease-out forwards; }
+  .modal-backdrop:not([hidden]) { animation: fadeIn 0.2s ease-out; }
+  .modal-backdrop:not([hidden]) .modal { animation: modalPop 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+  
+  .contact-card { 
+    transition: transform 0.2s ease, box-shadow 0.2s ease; 
+    animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .contact-card:hover { transform: translateY(-4px); box-shadow: 0 12px 20px -8px rgba(0,0,0,0.15); }
+  
+  .btn { transition: all 0.2s ease; }
+  .btn:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.05); }
+  .btn:active:not(:disabled) { transform: translateY(1px); filter: brightness(0.95); }
+  
+  .search-wrap { display: flex; gap: 8px; flex: 1; max-width: 600px; }
+  .search-input { flex: 1; }
+  #aiStatus { font-size: 11px; color: #64748b; margin-top: 4px; display: block; position: absolute; }
+  
+  .form-row-pfp { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
+  .pfp-preview { width: 64px; height: 64px; border-radius: 50%; background: #e2e8f0; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #64748b; font-weight: 600; overflow: hidden; border: 2px solid #cbd5e1; }
+  .pfp-preview img { width: 100%; height: 100%; object-fit: cover; }
+  
+  .network-wrapper { position: relative; width: 100%; height: 650px; background: #fafafa; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; }
+  #networkCanvas { cursor: grab; width: 100%; height: 100%; display: block; }
+  #networkCanvas:active { cursor: grabbing; }
+  .network-controls { position: absolute; bottom: 16px; right: 16px; display: flex; gap: 8px; }
+  
+  .interaction-actions { display: flex; gap: 8px; margin-top: 6px; }
+  
+  .contact-card:nth-child(1) { animation-delay: 0.05s; }
+  .contact-card:nth-child(2) { animation-delay: 0.10s; }
+  .contact-card:nth-child(3) { animation-delay: 0.15s; }
+  .contact-card:nth-child(4) { animation-delay: 0.20s; }
+</style>
 </head>
 <body>
-  <div class="app-shell">
-    <header class="topbar">
-      <div class="topbar-row">
-        <!-- Logo Option -->
-        <div class="brand" style="display:flex; align-items:center; gap:8px;">
-          <img src="logo.svg" alt="SyncSphere Logo" style="height:24px; width:24px;" onerror="this.style.display='none'">
-          SyncSphere
-        </div>
-        <div class="search-wrap">
-          <input type="text" id="globalSearch" class="search-input" placeholder="Search contacts...">
-          <button id="aiSearchBtn" class="btn btn-secondary btn-small ai-toggle">✨ Ask AI</button>
-        </div>
-        <div class="topbar-actions">
-          <button id="authDriveBtn" class="btn btn-secondary btn-small">Drive Login</button>
-          <button id="syncDriveBtn" class="btn btn-primary btn-small" hidden>Sync Data</button>
-          <button id="settingsBtn" class="btn btn-ghost btn-icon">⚙️</button>
-        </div>
-      </div>
-      <div class="tabbar">
-        <button class="tab active" data-view="directory">Directory</button>
-        <button class="tab" data-view="network">Network Map</button>
-      </div>
-    </header>
 
-    <main class="main">
-      <!-- Directory View -->
-      <div id="view-directory" class="view active">
-        <div class="filter-bar">
-          <button id="addContactBtn" class="btn btn-primary">+ Add Contact</button>
-          <button id="importVcfBtn" class="btn btn-secondary">Import vCard</button>
-          <input type="file" id="vcfInput" accept=".vcf" hidden>
-          <div class="filter-spacer"></div>
-          <span id="resultCount" class="result-count">0 contacts</span>
+<div id="appShell" class="app-shell">
+  <header class="topbar">
+    <div class="topbar-row">
+      <div class="brand">SyncSphere</div>
+      <div class="search-wrap">
+        <div style="flex:1; position: relative;">
+          <input type="search" id="globalSearch" class="search-input" placeholder="Search names, notes, tags…">
+          <span id="aiStatus"></span>
         </div>
-        <div id="contactGrid" class="contact-grid"></div>
-        <div id="emptyState" class="empty-state">
-          <h3>No contacts found</h3>
-          <p class="empty-sub">Add a contact or import a vCard to get started.</p>
-        </div>
+        <button type="button" id="aiSearchBtn" class="btn btn-secondary">✨ AI Search</button>
       </div>
+      <div class="topbar-actions">
+        <button type="button" id="settingsBtn" class="btn btn-icon" title="Settings">⚙️</button>
+      </div>
+    </div>
+    <nav class="tabbar">
+      <button type="button" class="tab active" data-view="directory">Directory</button>
+      <button type="button" class="tab" data-view="network">Network Map</button>
+      <button type="button" class="tab" data-view="reports">Reports</button>
+      <button type="button" class="tab" data-view="import">Import</button>
+    </nav>
+  </header>
 
-      <!-- Network View -->
-      <div id="view-network" class="view" style="height: 70vh; position: relative;">
-        <div style="position:absolute; top:10px; right:10px; z-index:10; display:flex; gap:5px;">
-          <button id="zoomInBtn" class="btn btn-secondary btn-small">+</button>
-          <button id="zoomOutBtn" class="btn btn-secondary btn-small">-</button>
-          <button id="resetZoomBtn" class="btn btn-secondary btn-small">Reset</button>
-        </div>
-        <canvas id="networkCanvas" style="width:100%; height:100%; border:1px solid var(--border); border-radius:var(--radius);"></canvas>
+  <main class="main">
+    <section id="view-directory" class="view active">
+      <div class="filter-bar">
+        <select id="tagFilter" class="select"><option value="">All tags</option></select>
+        <button type="button" id="overdueFilterBtn" class="chip" data-active="false">Overdue</button>
+        <select id="relationFilter" class="select"><option value="">All relationships</option></select>
+        <div class="filter-spacer"></div>
+        <span id="resultCount" class="result-count"></span>
+        <button type="button" id="mergeContactsBtn" class="btn btn-secondary" style="margin-right: 8px;">🔀 Merge</button>
+        <button type="button" id="addContactBtn" class="btn btn-primary">+ New contact</button>
       </div>
-    </main>
-  </div>
+      <div id="contactGrid" class="contact-grid"></div>
+      <div id="emptyState" class="empty-state" hidden>
+        <p>No contacts yet.</p>
+        <p class="empty-sub">Add your first person, or import a .vcf file.</p>
+      </div>
+    </section>
 
-  <!-- Contact Modal -->
-  <div id="contactModal" class="modal-backdrop" hidden>
-    <div class="modal">
-      <div class="modal-header">
-        <h2 id="contactModalTitle">New Contact</h2>
-        <button class="modal-close" data-close="contactModal">&times;</button>
+    <section id="view-network" class="view">
+      <div class="report-card report-card-wide" style="padding:0; border:none; background:transparent;">
+        <div class="network-wrapper">
+          <canvas id="networkCanvas"></canvas>
+          <div class="network-controls">
+            <button type="button" id="zoomInBtn" class="btn btn-secondary">+</button>
+            <button type="button" id="zoomOutBtn" class="btn btn-secondary">-</button>
+            <button type="button" id="resetZoomBtn" class="btn btn-secondary">Reset</button>
+          </div>
+        </div>
       </div>
-      <div class="modal-body">
+    </section>
+
+    <section id="view-reports" class="view">
+      <div class="report-grid">
+        <div class="report-card"><h3>Overdue reconnects</h3><div id="reportOverdue" class="report-list"></div></div>
+        <div class="report-card"><h3>Tag distribution</h3><div id="reportTags" class="report-list"></div></div>
+        <div class="report-card report-card-wide"><h3>Export</h3><div class="export-row"><button id="exportRawBtn" class="btn btn-secondary">Download JSON</button><button id="exportCsvBtn" class="btn btn-secondary">Download CSV</button></div></div>
+      </div>
+    </section>
+    
+    <section id="view-import" class="view">
+      <div class="import-card">
+        <h3>Import from vCard (.vcf)</h3>
+        <div id="dropZone" class="drop-zone">
+          <p>Drag & drop .vcf files here</p>
+          <label class="btn btn-secondary file-label">
+            Choose file
+            <input type="file" id="vcfInput" accept=".vcf,text/vcard" hidden>
+          </label>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- MODALS -->
+<div id="contactModal" class="modal-backdrop" hidden>
+  <div class="modal modal-large">
+    <div class="modal-header"><h2 id="contactModalTitle">New contact</h2><button type="button" class="modal-close" data-close="contactModal">&times;</button></div>
+    <div class="modal-body">
+      <form id="contactForm">
         <input type="hidden" id="contactId">
-        <div class="form-row form-row-pfp">
-          <div id="pfpPreview" class="pfp-preview">
-            <img id="pfpImg" hidden>
+        <div class="form-row-pfp">
+          <div class="pfp-preview" id="pfpPreview">
             <span id="pfpInitial">?</span>
+            <img id="pfpImg" hidden alt="Profile photo">
           </div>
           <div>
-            <label class="btn btn-secondary btn-small">
-              Upload Photo <input type="file" id="pfpInput" accept="image/*" hidden>
-            </label>
-            <button id="removePfpBtn" class="btn btn-ghost btn-small" hidden>Remove</button>
+            <label class="btn btn-secondary file-label">Upload photo<input type="file" id="pfpInput" accept="image/*" hidden></label>
+            <button type="button" id="removePfpBtn" class="btn btn-ghost btn-small" style="margin-left:8px;" hidden>Remove</button>
           </div>
         </div>
-        <div class="form-row">
-          <label>Full Name</label>
-          <input type="text" id="fullNameInput" class="input" placeholder="e.g. Jane Doe">
-        </div>
+        <div class="form-row"><label>Full name</label><input type="text" id="fullNameInput" class="input" required></div>
         <div class="form-row form-row-split">
+          <div><label>Tags (comma separated)</label><input type="text" id="tagsInput" class="input"></div>
           <div>
-            <label>Tags (comma separated)</label>
-            <input type="text" id="tagsInput" class="input" placeholder="e.g. Work, VIP">
-          </div>
-          <div>
-            <label>Reconnect Goal</label>
+            <label>Reconnect goal</label>
             <div style="display:flex; gap:8px;">
-              <input type="number" id="frequencyInput" class="input" placeholder="Value" style="flex:1;">
-              <select id="frequencyUnit" class="select" style="margin-top:4px; flex:1;">
-                <option value="1">Days</option>
-                <option value="7">Weeks</option>
-                <option value="30">Months</option>
+              <input type="number" id="frequencyInput" class="input" style="flex:1;">
+              <select id="frequencyUnitInput" class="select">
+                <option value="days">Days</option>
+                <option value="weeks">Weeks</option>
+                <option value="months">Months</option>
               </select>
             </div>
           </div>
         </div>
-        <div class="form-row">
-          <label>Contact Methods</label>
-          <div id="handleRows" class="dynamic-rows"></div>
-          <button id="addHandleBtn" class="btn btn-ghost btn-small btn-block">+ Add Method</button>
-        </div>
-        <div class="form-row">
-          <label>Relationships</label>
-          <div id="relationRows" class="dynamic-rows"></div>
-          <div class="relation-add">
-            <select id="relationTargetSelect" class="select"></select>
-            <input type="text" id="relationLabelInput" class="input" placeholder="e.g. Manager">
-          </div>
-          <button id="addRelationBtn" class="btn btn-ghost btn-small btn-block">+ Add Relation</button>
-        </div>
-        <div class="form-row">
-          <label>Notes</label>
-          <textarea id="notesInput" class="input textarea" rows="3"></textarea>
-        </div>
-        <div class="form-row">
-          <div class="row-between" style="margin-bottom:8px;">
-            <label style="margin:0;">Interactions</label>
-            <button id="addInteractionBtn" class="btn btn-secondary btn-small">+ Log</button>
-          </div>
-          <div id="interactionList" class="interaction-list"></div>
-        </div>
+        <div class="form-row"><label>Contact handles</label><div id="handleRows" class="dynamic-rows"></div><button type="button" id="addHandleBtn" class="btn btn-ghost btn-small">+ Add handle</button></div>
+        <div class="form-row"><label>Relationships</label><div id="relationRows" class="dynamic-rows"></div><div class="relation-add"><select id="relationTargetSelect" class="select"></select><input type="text" id="relationLabelInput" class="input" placeholder="e.g. Sister"><button type="button" id="addRelationBtn" class="btn btn-ghost btn-small">+ Link</button></div></div>
+        <div class="form-row"><label>Notes</label><textarea id="notesInput" class="input textarea" rows="4"></textarea></div>
+        <div class="form-row"><div class="row-between"><label>Interaction history</label><button type="button" id="addInteractionBtn" class="btn btn-ghost btn-small">+ Log interaction</button></div><div id="interactionList" class="interaction-list"></div></div>
+      </form>
+    </div>
+    <div class="modal-footer"><button type="button" id="deleteContactBtn" class="btn btn-danger" hidden>Delete</button><div class="modal-footer-spacer"></div><button type="button" class="btn btn-ghost" data-close="contactModal">Cancel</button><button type="button" id="saveContactBtn" class="btn btn-primary">Save contact</button></div>
+  </div>
+</div>
+
+<div id="mergeModal" class="modal-backdrop" hidden>
+  <div class="modal modal-small">
+    <div class="modal-header"><h2>Merge Contacts</h2><button type="button" class="modal-close" data-close="mergeModal">&times;</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <label>Primary Contact (Keep)</label>
+        <select id="mergePrimarySelect" class="select"></select>
       </div>
-      <div class="modal-footer">
-        <button id="deleteContactBtn" class="btn btn-danger">Delete</button>
-        <div class="modal-footer-spacer"></div>
-        <button class="btn btn-secondary" data-close="contactModal">Cancel</button>
-        <button id="saveContactBtn" class="btn btn-primary">Save</button>
+      <div class="form-row">
+        <label>Secondary Contact (Merge & Remove)</label>
+        <select id="mergeSecondarySelect" class="select"></select>
+      </div>
+      <p style="font-size:12px; color:#64748b; margin-top:8px;">
+        All interactions, notes, tags, handles, and relationships from the secondary contact will be combined into the primary contact.
+      </p>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-ghost" data-close="mergeModal">Cancel</button>
+      <button type="button" id="confirmMergeBtn" class="btn btn-primary">Confirm Merge</button>
+    </div>
+  </div>
+</div>
+
+<div id="interactionModal" class="modal-backdrop" hidden>
+  <div class="modal modal-small">
+    <div class="modal-header"><h2>Log interaction</h2><button type="button" class="modal-close" data-close="interactionModal">&times;</button></div>
+    <div class="modal-body">
+      <input type="hidden" id="quickInteractionContactId">
+      <div class="form-row"><label>Channel</label><input type="text" id="quickChannelInput" class="input" placeholder="Call, Coffee..."></div>
+      <div class="form-row"><label>Summary</label><textarea id="quickSummaryInput" class="input textarea" rows="3"></textarea></div>
+    </div>
+    <div class="modal-footer"><div class="modal-footer-spacer"></div><button type="button" class="btn btn-ghost" data-close="interactionModal">Cancel</button><button type="button" id="saveQuickInteractionBtn" class="btn btn-primary">Save</button></div>
+  </div>
+</div>
+
+<div id="settingsModal" class="modal-backdrop" hidden>
+  <div class="modal modal-small">
+    <div class="modal-header"><h2>Settings</h2><button type="button" class="modal-close" data-close="settingsModal">&times;</button></div>
+    <div class="modal-body">
+      <div class="settings-block" style="margin-bottom: 20px;">
+        <p class="settings-label" style="font-weight:600; margin-bottom:8px;">Google Drive Sync</p>
+        <input type="password" id="masterPasswordInput" class="input" placeholder="Master Encryption Password" style="margin-bottom:8px;">
+        <button type="button" id="gdriveLoginBtn" class="btn btn-primary btn-block" style="margin-bottom:8px;">Login to Google Drive</button>
+        <button type="button" id="gdriveSyncBtn" class="btn btn-secondary btn-block">Sync Data to Drive</button>
+      </div>
+      <hr style="border:none; border-top:1px solid #e2e8f0; margin:16px 0;">
+      <div class="settings-block">
+        <p class="settings-label" style="font-weight:600; color:#e11d48; margin-bottom:8px;">Danger Zone</p>
+        <button type="button" id="wipeLocalBtn" class="btn btn-danger btn-block">Erase all local data</button>
       </div>
     </div>
   </div>
+</div>
 
-  <!-- Quick Interaction Modal -->
-  <div id="interactionModal" class="modal-backdrop" hidden>
-    <div class="modal modal-small">
-      <div class="modal-header">
-        <h2>Log Interaction</h2>
-        <button class="modal-close" data-close="interactionModal">&times;</button>
-      </div>
-      <div class="modal-body">
-        <input type="hidden" id="quickInteractionContactId">
-        <div class="form-row">
-          <label>Channel</label>
-          <input type="text" id="quickChannelInput" class="input" placeholder="e.g. Email, Coffee">
-        </div>
-        <div class="form-row">
-          <label>Summary</label>
-          <textarea id="quickSummaryInput" class="input textarea" rows="3"></textarea>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button class="btn btn-secondary" data-close="interactionModal">Cancel</button>
-        <button id="saveQuickInteractionBtn" class="btn btn-primary">Save Log</button>
-      </div>
-    </div>
-  </div>
+<div id="toast" class="toast" hidden></div>
 
-  <!-- Settings Modal -->
-  <div id="settingsModal" class="modal-backdrop" hidden>
-    <div class="modal modal-small">
-      <div class="modal-header">
-        <h2>Settings</h2>
-        <button class="modal-close" data-close="settingsModal">&times;</button>
-      </div>
-      <div class="modal-body">
-        <p id="aiStatus" style="color:var(--accent); font-weight:bold; margin-bottom: 10px;"></p>
-        <div class="settings-block">
-          <div class="settings-label">Security & Sync</div>
-          <p class="label-hint" style="margin-bottom:8px;">Data is encrypted locally before being synced to Google Drive via AES-256-GCM.</p>
-          <input type="password" id="masterPassword" class="input" placeholder="Master Password (Required for Sync)">
-        </div>
-        <div class="settings-block">
-          <div class="settings-label">Danger Zone</div>
-          <button id="wipeLocalBtn" class="btn btn-danger btn-block">Wipe Local Database</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <div id="toast" class="toast" hidden></div>
-
-  <!-- Scripts -->
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
-  <script src="crypto.js"></script>
-  <script src="gdrive.js"></script>
-  <script src="vcard.js"></script>
-  <script src="network.js"></script>
-  <script src="ai.js" type="module"></script>
-  <script src="app.js"></script>
-  
-  <script>
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('sw.js');
-    }
-  </script>
+<script src="./vcard.js"></script>
+<script src="./crypto.js"></script>
+<script src="./gdrive.js"></script>
+<script src="./network.js"></script>
+<script src="./app.js"></script>
 </body>
 </html>

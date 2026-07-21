@@ -1,23 +1,30 @@
+/**
+ * ai.js - Local Browser AI
+ * Uses SmolLM-135M-Instruct (~85MB), an incredibly smart, tiny instruction model.
+ */
+
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1';
 
-// Enable WebAssembly backend threads for speed
+// Fix for model downloading correctly
+env.allowLocalModels = false;
 env.backends.onnx.wasm.numThreads = 1; 
-// By ensuring standard remote fetches, it correctly downloads the ~85mb model
-env.allowLocalModels = false; 
+env.backends.onnx.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/';
 
 let generator = null;
 
 async function loadModel() {
   const statusEl = document.getElementById('aiStatus');
-  if(statusEl) statusEl.textContent = "Downloading AI Model (One-time, ~85MB)...";
+  if (statusEl) statusEl.textContent = "Downloading AI Model (One-time, ~85MB)...";
   
   try {
     generator = await pipeline('text-generation', 'Xenova/SmolLM-135M-Instruct');
-    if(statusEl) statusEl.textContent = "AI Ready.";
-    setTimeout(() => { if(statusEl) statusEl.textContent = ""; }, 3000);
+    if (statusEl) {
+        statusEl.textContent = "AI Ready.";
+        setTimeout(() => { statusEl.textContent = ""; }, 3000);
+    }
   } catch (err) {
     console.error(err);
-    if(statusEl) statusEl.textContent = "Failed to load model.";
+    if (statusEl) statusEl.textContent = "Failed to load model.";
     document.getElementById('aiSearchBtn').disabled = false;
   }
 }
@@ -36,6 +43,7 @@ document.getElementById('aiSearchBtn').addEventListener('click', async () => {
 
   if (generator) {
     const activeContacts = (window.state.contacts || []).filter(c => !c.isDeleted);
+    
     const dataString = activeContacts.map(c => {
       const rels = (c.relationships||[]).map(r => r.label).join(', ');
       return `Name: ${c.fullName} | Tags: ${(c.tags||[]).join(', ')} | Relations: ${rels||'none'} | Notes: ${c.notes||'none'}`;
