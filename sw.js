@@ -9,6 +9,7 @@ const SHELL_FILES = [
   './index.html',
   './styles.css',
   './app.js',
+  './ai.js',
   './crypto.js',
   './gdrive.js',
   './vcard.js',

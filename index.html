@@ -81,6 +81,9 @@
         <span id="aiStatus"></span>
       </div>
       <div class="topbar-actions">
+        <button type="button" id="syncBtn" class="btn btn-primary btn-sync" title="Sync with Google Drive">
+          <span id="syncBtnIcon" class="sync-icon">⟳</span><span id="syncBtnLabel">Sync</span>
+        </button>
         <button type="button" id="settingsBtn" class="btn btn-icon" title="Settings">⚙️</button>
       </div>
     </div>
@@ -88,21 +91,21 @@
       <button type="button" class="tab active" data-view="directory">Directory</button>
       <button type="button" class="tab" data-view="network">Network Map</button>
       <button type="button" class="tab" data-view="reports">Reports</button>
-      <button type="button" class="tab" data-view="import">Import</button>
+      <button type="button" class="tab" data-view="import">Sync</button>
     </nav>
   </header>
 
   <main class="main">
     <section id="view-directory" class="view active">
       <div class="filter-bar">
-        <select id="tagFilter" class="select"><option value="">All tags</option></select>
+        <select id="filterSelect" class="select"><option value="">All contacts</option></select>
         <button type="button" id="overdueFilterBtn" class="chip" data-active="false">Overdue</button>
-        <select id="relationFilter" class="select"><option value="">All relationships</option></select>
         <div class="filter-spacer"></div>
         <span id="resultCount" class="result-count"></span>
         <button type="button" id="mergeContactsBtn" class="btn btn-secondary" style="margin-right: 8px;">🔀 Merge</button>
         <button type="button" id="addContactBtn" class="btn btn-primary">+ New contact</button>
       </div>
+      <div id="mergeSuggestions" class="merge-suggestions"></div>
       <div id="contactGrid" class="contact-grid"></div>
       <div id="emptyState" class="empty-state" hidden>
         <p>No contacts yet.</p>
@@ -133,7 +136,21 @@
     
     <section id="view-import" class="view">
       <div class="import-card">
-        <h3>Import from vCard (.vcf)</h3>
+        <div class="row-between" style="margin-bottom:10px;">
+          <h3 style="margin:0;">Google Drive sync</h3>
+          <span id="syncStatusLine" class="report-hint" style="margin:0;">Not connected</span>
+        </div>
+        <p class="report-hint">Signs in with your Google account and stores one backup file in a hidden app folder in your own Drive — not visible in your normal Drive, and not accessible to other apps. Signing in with the same account on another device picks up the same contacts there.</p>
+        <input type="password" id="masterPasswordInput" class="input" placeholder="Master password (optional — encrypts your backup)" style="margin-bottom:8px;">
+        <p class="report-hint" style="margin-bottom:14px;">Leave this blank to sync as plain JSON. Set a password to encrypt the backup — you'll need the same password on every device to load it, and there's no recovery if you forget it.</p>
+        <div style="display:flex; gap:8px;">
+          <button type="button" id="gdriveLoginBtn" class="btn btn-secondary" style="flex:1;">Login to Google Drive</button>
+          <button type="button" id="gdriveSyncBtn" class="btn btn-primary" style="flex:1;">Sync now</button>
+        </div>
+      </div>
+      <div class="import-card" style="margin-top:16px;">
+        <h3>Add contacts from a vCard (.vcf)</h3>
+        <p class="report-hint">A one-time import from a phone or address book export — these get folded into the same synced contact list above.</p>
         <div id="dropZone" class="drop-zone">
           <p style="margin-bottom:12px;">Drag & drop .vcf files here, or click to browse</p>
           <button type="button" id="triggerVcfBtn" class="btn btn-secondary">Choose vCard File</button>
@@ -234,15 +251,8 @@
     <div class="modal-header"><h2>Settings</h2><button type="button" class="modal-close" data-close="settingsModal">&times;</button></div>
     <div class="modal-body">
       <div class="settings-block" style="margin-bottom: 20px;">
-        <p class="settings-label" style="font-weight:600; margin-bottom:8px;">Google Drive Sync</p>
-        <p class="report-hint" style="margin-bottom:10px;">Signs in with your Google account and stores a backup in a hidden app folder in your own Drive — not visible in your normal Drive, and not accessible to other apps. Sign in with the same account on another device to pick up your contacts there too.</p>
-        <input type="password" id="masterPasswordInput" class="input" placeholder="Master password (optional — encrypts your backup)" style="margin-bottom:8px;">
-        <p class="report-hint" style="margin-bottom:10px;">Leave this blank to sync as plain JSON. Set a password to encrypt the backup — if you do, you'll need the same password on every device to load it, and there's no recovery if you forget it.</p>
-        <button type="button" id="gdriveLoginBtn" class="btn btn-primary btn-block" style="margin-bottom:8px;">Login to Google Drive</button>
-        <div style="display:flex; gap:8px;">
-          <button type="button" id="gdriveSyncBtn" class="btn btn-secondary" style="flex:1;">Save to Drive</button>
-          <button type="button" id="gdriveLoadBtn" class="btn btn-secondary" style="flex:1;">Load from Drive</button>
-        </div>
+        <p class="settings-label" style="font-weight:600; margin-bottom:8px;">Local AI (Gemma 3)</p>
+        <p class="report-hint" id="aiCapabilityLine" style="margin-bottom:10px;">Checking this device's capability…</p>
       </div>
       <hr style="border:none; border-top:1px solid #e2e8f0; margin:16px 0;">
       <div class="settings-block">
@@ -255,10 +265,20 @@
 
 <div id="toast" class="toast" hidden></div>
 
+<div id="aiIsland" class="ai-island" hidden>
+  <div class="ai-island-header">
+    <span class="ai-island-dot"></span>
+    <span id="aiIslandTitle" class="ai-island-title">Gemma 3</span>
+    <button type="button" id="aiIslandClose" class="ai-island-close" aria-label="Close">&times;</button>
+  </div>
+  <div id="aiIslandBody" class="ai-island-body"></div>
+</div>
+
 <script src="./vcard.js"></script>
 <script src="./crypto.js"></script>
 <script src="./gdrive.js"></script>
 <script src="./network.js"></script>
+<script type="module" src="./ai.js"></script>
 <script src="./app.js"></script>
 </body>
 </html>

@@ -112,10 +112,12 @@ const GoogleDrive = (() => {
 
   async function apiFetch(url, options = {}) {
     const token = await ensureToken();
+    const { keepalive, ...fetchOptions } = options;
     const resp = await fetch(url, {
-      ...options,
+      ...fetchOptions,
+      keepalive: !!keepalive, // lets an upload survive a page teardown, unlike sendBeacon this still allows the Authorization header
       headers: {
-        ...(options.headers || {}),
+        ...(fetchOptions.headers || {}),
         Authorization: `Bearer ${token}`,
       },
     });
@@ -143,16 +145,25 @@ const GoogleDrive = (() => {
     return null;
   }
 
-  /** Uploads (create or update) the encrypted backup envelope. */
-  async function uploadBackup(envelopeObject) {
-    const fileId = await findBackupFileId();
+  /** Uploads (create or update) the encrypted backup envelope.
+   * Pass { keepalive: true } when calling this from a visibilitychange/pagehide
+   * handler so the request has a chance to complete after the tab starts
+   * tearing down. Note: PATCH-with-keepalive has flakier browser support than
+   * POST-with-keepalive, so a keepalive flush always creates-or-recreates the
+   * file via POST rather than PATCHing in place. */
+  async function uploadBackup(envelopeObject, opts = {}) {
+    const keepalive = !!opts.keepalive;
+    // During a keepalive flush we avoid the network round-trip findBackupFileId()
+    // would make (no time for that mid-teardown) and just reuse whatever file id
+    // is already cached from an earlier normal sync in this session, if any.
+    const fileId = keepalive ? cachedFileId : await findBackupFileId();
     const body = JSON.stringify(envelopeObject);
     const metadata = { name: BACKUP_FILENAME, mimeType: 'application/json' };
 
     if (fileId) {
       await apiFetch(
         `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
-        { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }
+        { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body, keepalive }
       );
       return fileId;
     }
@@ -171,6 +182,7 @@ const GoogleDrive = (() => {
         method: 'POST',
         headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
         body: multipartBody,
+        keepalive,
       }
     );
     const json = await resp.json();

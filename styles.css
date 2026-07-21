@@ -20,9 +20,17 @@
 }
 [hidden]{display:none !important;}
 html,body{height:100%;}
+@keyframes bg-drift{
+  0%{background-position:0% 0%;}
+  50%{background-position:100% 100%;}
+  100%{background-position:0% 0%;}
+}
 body{
   margin:0;
-  background:var(--bg);
+  background:var(--text);
+  background:linear-gradient(120deg, #FFFFFF 0%, #FBFBF9 35%, #F6F5F1 65%, #FFFFFF 100%);
+  background-size:300% 300%;
+  animation:bg-drift 40s ease-in-out infinite;
   color:var(--text);
   -webkit-font-smoothing:antialiased;
   padding-top:env(safe-area-inset-top);
@@ -317,8 +325,10 @@ input,textarea,select{font-family:var(--font);}
 }
 
 @media (max-width:640px){
-  .topbar-row{flex-wrap:wrap;}
-  .search-wrap{order:3; width:100%;}
+  .topbar-row{gap:8px;}
+  .brand{display:none;} /* first to go when space is tight — search + actions stay inline */
+  .search-wrap{min-width:0;}
+  #syncBtnLabel{display:none;} /* icon-only sync button on narrow screens, still inline */
   .form-row-split{grid-template-columns:1fr;}
   .report-grid{grid-template-columns:1fr;}
 }
@@ -336,17 +346,29 @@ input,textarea,select{font-family:var(--font);}
 .ai-toggle-btn{position:relative; z-index:1;}
 
 @keyframes ai-ring-spin{ to { transform:rotate(360deg); } }
+@keyframes ai-glow-pulse{ 0%,100%{opacity:.55;} 50%{opacity:1;} }
+/* A true ring: the conic gradient fills this whole box, but a CSS mask cuts
+   out everything except a thin band around the edge, so it traces the pill's
+   actual rounded shape instead of showing as a filled rotating rectangle. */
 .search-input-container.ai-active::before{
   content:'';
   position:absolute;
-  inset:-3px;
-  border-radius:12px;
+  inset:-2px;
+  border-radius:999px; /* true pill, matches the input's rounded ends */
+  padding:2px;
   background:conic-gradient(from 0deg, #6366f1, #a855f7, #ec4899, #f59e0b, #10b981, #06b6d4, #6366f1);
-  animation:ai-ring-spin 3.2s linear infinite;
+  -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;
+  mask-composite:exclude;
+  animation:ai-ring-spin 4.5s linear infinite, ai-glow-pulse 2.4s ease-in-out infinite;
+  pointer-events:none;
   z-index:0;
 }
 .search-input-container.ai-active.ai-thinking::before{
-  animation-duration:1s;
+  animation-duration:1.4s, 0.9s;
+}
+.search-input-container.ai-active .search-input{
+  border-radius:999px;
 }
 
 @keyframes ai-pop{
@@ -355,3 +377,77 @@ input,textarea,select{font-family:var(--font);}
   100%{transform:scale(1.05) rotate(0);}
 }
 .ai-toggle-btn.active{animation:ai-pop .35s cubic-bezier(.34,1.56,.64,1);}
+/* ---------- Sync button (topbar) ---------- */
+.btn-sync{display:flex; align-items:center; gap:6px; padding:9px 14px;}
+.sync-icon{display:inline-block; font-size:14px; transition:transform .5s ease;}
+.btn-sync.syncing .sync-icon{animation:sync-spin 1s linear infinite;}
+.btn-sync.synced{background:#0f9d58; border-color:#0f9d58;}
+.btn-sync.sync-error{background:var(--red); border-color:var(--red);}
+@keyframes sync-spin{ to { transform:rotate(360deg); } }
+
+/* ---------- Merge suggestions banner ---------- */
+.merge-suggestions{display:flex; flex-direction:column; gap:8px; margin-bottom:16px;}
+.merge-suggestion-card{
+  display:flex; align-items:center; gap:12px;
+  border:1px solid #E7E0FF; background:#FAF8FF;
+  border-radius:10px; padding:12px 14px;
+  font-size:13.5px;
+}
+.merge-suggestion-text{flex:1; min-width:0;}
+.merge-suggestion-text strong{font-weight:600;}
+.merge-suggestion-reason{display:block; font-size:12px; color:var(--text-muted); margin-top:2px;}
+.merge-suggestion-actions{display:flex; gap:6px; flex:0 0 auto;}
+
+/* ---------- AI capability badge ---------- */
+.ai-toggle-btn.unavailable{opacity:.3; cursor:not-allowed;}
+
+/* ---------- Dynamic-island AI answer popup ---------- */
+.ai-island{
+  position:fixed;
+  left:50%;
+  bottom:28px;
+  transform:translateX(-50%) translateY(0);
+  width:min(92vw, 420px);
+  background:#111318;
+  color:#fff;
+  border-radius:20px;
+  box-shadow:0 20px 40px -12px rgba(0,0,0,.35), 0 2px 8px rgba(0,0,0,.2);
+  z-index:300;
+  overflow:hidden;
+  animation:island-in .35s cubic-bezier(.16,1,.3,1);
+}
+@keyframes island-in{
+  from{opacity:0; transform:translateX(-50%) translateY(16px) scale(.96);}
+  to{opacity:1; transform:translateX(-50%) translateY(0) scale(1);}
+}
+.ai-island-header{
+  display:flex; align-items:center; gap:8px;
+  padding:10px 14px;
+  font-size:12px; font-weight:600; letter-spacing:.02em;
+  color:#C9C9D6;
+  border-bottom:1px solid rgba(255,255,255,.08);
+}
+.ai-island-dot{
+  width:7px; height:7px; border-radius:50%;
+  background:#6366f1;
+  box-shadow:0 0 0 0 rgba(99,102,241,.6);
+  animation:island-dot-pulse 1.6s ease-in-out infinite;
+}
+@keyframes island-dot-pulse{
+  0%{box-shadow:0 0 0 0 rgba(99,102,241,.5);}
+  70%{box-shadow:0 0 0 6px rgba(99,102,241,0);}
+  100%{box-shadow:0 0 0 0 rgba(99,102,241,0);}
+}
+.ai-island-title{flex:1;}
+.ai-island-close{background:none; border:none; color:#8f8fa3; font-size:18px; line-height:1; cursor:pointer;}
+.ai-island-close:hover{color:#fff;}
+.ai-island-body{padding:12px 14px 16px; font-size:14px; line-height:1.5;}
+
+@media (prefers-reduced-motion: reduce){
+  body{animation:none;}
+  .ai-island{animation:none;}
+}
+
+@media (max-width:640px){
+  .ai-island{bottom:16px; width:94vw;}
+}

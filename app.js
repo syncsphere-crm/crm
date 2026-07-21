@@ -6,8 +6,7 @@ const STORAGE_KEY = 'syncsphere_contacts_v1';
 window.state = {
   contacts: [],
   activeView: 'directory',
-  tagFilter: '',
-  relationFilter: '',
+  filterValue: '', // '' | 'tag:<name>' | 'rel:<contactId>'
   overdueOnly: false,
   searchQuery: '',
   aiSearchEnabled: false,
@@ -15,15 +14,19 @@ window.state = {
   relationRowsDraft: [],
   interactionsDraft: [],
   pendingPfpBase64: null,
+  dirty: false, // true when local data has changes not yet pushed to Drive
+  dismissedMergePairs: new Set(), // session-only, "idA|idB" sorted
 };
 
 let semanticWorker = null;
 let promptInterval = null;
+let gemmaCapability = null; // { supported: bool, reason?: string }
+let lastSemanticQueryText = '';
 const EXAMPLE_PROMPTS = [
   '✨ Try: "Who works at Google?"',
   '✨ Try: "Friends from college"',
   '✨ Try: "Software developer in NYC"',
-  '✨ Try: "Notes about coffee or lunch"'
+  '✨ Try: "How many people are overdue?" (press Enter)'
 ];
 
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11));
@@ -40,8 +43,8 @@ function toast(msg, ms = 3000) {
 const els = {};
 function cacheEls() {
   const ids = [
-    'globalSearch','settingsBtn','contactGrid','emptyState','tagFilter',
-    'overdueFilterBtn','relationFilter','resultCount','addContactBtn','reportOverdue',
+    'globalSearch','settingsBtn','contactGrid','emptyState','filterSelect',
+    'overdueFilterBtn','resultCount','addContactBtn','reportOverdue',
     'reportTags','exportRawBtn','exportCsvBtn','dropZone','triggerVcfBtn','vcfInput','contactModal',
     'contactModalTitle','contactId','fullNameInput','tagsInput','frequencyInput', 'frequencyUnitInput',
     'companyInput', 'jobTitleInput', 'schoolInput', 'locationInput',
@@ -50,9 +53,12 @@ function cacheEls() {
     'saveContactBtn','interactionModal','quickInteractionContactId','quickChannelInput',
     'quickSummaryInput','saveQuickInteractionBtn','settingsModal','wipeLocalBtn',
     'pfpInput', 'pfpPreview', 'pfpImg', 'pfpInitial', 'removePfpBtn',
-    'gdriveLoginBtn', 'gdriveSyncBtn', 'gdriveLoadBtn', 'masterPasswordInput',
-    'aiToggleBtn', 'aiStatus', 'searchInputContainer',
-    'mergeContactsBtn', 'mergeModal', 'mergePrimarySelect', 'mergeSecondarySelect', 'confirmMergeBtn'
+    'gdriveLoginBtn', 'gdriveSyncBtn', 'masterPasswordInput', 'syncStatusLine',
+    'syncBtn', 'syncBtnIcon', 'syncBtnLabel',
+    'aiToggleBtn', 'aiStatus', 'searchInputContainer', 'aiCapabilityLine',
+    'mergeContactsBtn', 'mergeModal', 'mergePrimarySelect', 'mergeSecondarySelect', 'confirmMergeBtn',
+    'mergeSuggestions',
+    'aiIsland', 'aiIslandTitle', 'aiIslandBody', 'aiIslandClose',
   ];
   ids.forEach((id) => { 
     els[id] = document.getElementById(id); 
@@ -69,16 +75,19 @@ function loadAllFromStorage() {
 
 function saveAllToStorage() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(window.state.contacts));
+  window.state.dirty = true;
+  updateSyncButtonState('dirty');
   indexSemanticSearch();
 }
 
 const DRIVE_CONNECTED_KEY = 'rolodex_drive_connected_v1';
+const LAST_SYNC_KEY = 'rolodex_last_synced_v1';
 
 /**
  * Merge a remote contact list into the local one, per-contact last-write-wins
- * by updatedAt. This is what actually makes multi-device sync safe: previously
- * a Drive load just overwrote window.state.contacts wholesale, so loading on
- * a second device could silently erase edits made locally after the last sync.
+ * by updatedAt. This is what actually makes multi-device sync safe: a Drive
+ * load overwriting window.state.contacts wholesale could silently erase edits
+ * made locally after the last sync.
  */
 function mergeContactsLWW(localContacts, remoteContacts) {
   const byId = new Map(localContacts.map(c => [c.id, c]));
@@ -92,84 +101,127 @@ function mergeContactsLWW(localContacts, remoteContacts) {
 }
 
 function updateDriveUI() {
-  if (!els.gdriveLoginBtn) return;
-  els.gdriveLoginBtn.textContent = GoogleDrive.isSignedIn()
-    ? 'Drive: Connected (tap to disconnect)'
-    : 'Login to Google Drive';
-}
-
-async function handleDriveSync() {
-  if (!GoogleDrive.isSignedIn()) return toast('Please login to Google Drive first.');
-  const pwd = els.masterPasswordInput.value.trim();
-
-  try {
-    let payload;
-    if (pwd) {
-      toast('Encrypting and saving to Drive...');
-      if (!CryptoEngine.hasExistingVault()) {
-        await CryptoEngine.initializeVault(pwd);
-      } else {
-        const unlocked = await CryptoEngine.unlockVault(pwd);
-        if (!unlocked) return toast('Invalid master password.');
-      }
-      payload = await CryptoEngine.encrypt(window.state.contacts);
-      payload.encrypted = true;
+  const signedIn = GoogleDrive.isSignedIn();
+  if (els.gdriveLoginBtn) {
+    els.gdriveLoginBtn.textContent = signedIn ? 'Connected (tap to disconnect)' : 'Login to Google Drive';
+  }
+  if (els.syncStatusLine) {
+    if (!signedIn) {
+      els.syncStatusLine.textContent = 'Not connected';
     } else {
-      toast('Saving to Drive...');
-      payload = { v: 1, encrypted: false, data: window.state.contacts };
+      const last = Number(localStorage.getItem(LAST_SYNC_KEY) || 0);
+      els.syncStatusLine.textContent = last ? `Last synced ${timeAgo(last)}` : 'Connected — not yet synced';
     }
-    await GoogleDrive.uploadBackup(payload);
-    toast('Saved to Google Drive.');
-  } catch (err) {
-    console.error(err);
-    toast('Save failed. Check console.');
   }
 }
 
-async function handleDriveLoad(opts = {}) {
+function timeAgo(ts) {
+  const mins = Math.floor((Date.now() - ts) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+/** One button, three visual states: dirty (unsynced changes) / syncing / synced. */
+function updateSyncButtonState(state) {
+  if (!els.syncBtn) return;
+  els.syncBtn.classList.remove('syncing', 'synced', 'sync-error');
+  if (state === 'syncing') {
+    els.syncBtn.classList.add('syncing');
+    if (els.syncBtnLabel) els.syncBtnLabel.textContent = 'Syncing…';
+  } else if (state === 'synced') {
+    els.syncBtn.classList.add('synced');
+    if (els.syncBtnLabel) els.syncBtnLabel.textContent = 'Synced';
+    setTimeout(() => { if (els.syncBtnLabel) els.syncBtnLabel.textContent = 'Sync'; els.syncBtn.classList.remove('synced'); }, 2500);
+  } else if (state === 'error') {
+    els.syncBtn.classList.add('sync-error');
+    if (els.syncBtnLabel) els.syncBtnLabel.textContent = 'Retry sync';
+  } else {
+    if (els.syncBtnLabel) els.syncBtnLabel.textContent = 'Sync';
+  }
+}
+
+/**
+ * ONE unified sync action (replaces the old separate "Save to Drive" /
+ * "Load from Drive" buttons): downloads whatever is on Drive, merges it
+ * with local changes (last-write-wins per contact), saves the merged result
+ * locally, then uploads that same merged result back — so both sides end
+ * up consistent in a single action. This is what runs automatically right
+ * after login, and what the prominent header "Sync" button triggers by hand.
+ */
+async function runFullSync(opts = {}) {
   const silent = !!opts.silent;
   if (!GoogleDrive.isSignedIn()) { if (!silent) toast('Please login to Google Drive first.'); return; }
 
+  updateSyncButtonState('syncing');
   try {
-    if (!silent) toast('Loading from Google Drive...');
+    // 1. Pull remote and merge in.
     const payload = await GoogleDrive.downloadBackup();
-    if (!payload) { if (!silent) toast('No backup found on Drive yet — try "Save to Drive" first.'); return; }
+    if (payload) {
+      const isEncrypted = payload.encrypted === true || (payload.iv && typeof payload.data === 'string');
+      let remoteContacts = null;
 
-    // Legacy backups (from before encryption became optional) don't have an
-    // `encrypted` flag but always have `iv`/`data` from CryptoEngine.encrypt.
-    const isEncrypted = payload.encrypted === true || (payload.iv && typeof payload.data === 'string');
-
-    let remoteContacts;
-    if (isEncrypted) {
-      const pwd = els.masterPasswordInput.value.trim();
-      if (!pwd) { if (!silent) toast('This backup is encrypted — enter the master password first.'); return; }
-      if (!CryptoEngine.hasExistingVault()) {
-        await CryptoEngine.initializeVault(pwd);
+      if (isEncrypted) {
+        const pwd = els.masterPasswordInput.value.trim();
+        if (!pwd) {
+          if (!silent) toast('This backup is encrypted — enter the master password, then hit Sync again.');
+          updateSyncButtonState('error');
+          return;
+        }
+        if (!CryptoEngine.hasExistingVault()) {
+          await CryptoEngine.initializeVault(pwd);
+        } else if (!(await CryptoEngine.unlockVault(pwd))) {
+          if (!silent) toast('Invalid master password.');
+          updateSyncButtonState('error');
+          return;
+        }
+        remoteContacts = await CryptoEngine.decrypt(payload);
       } else {
-        const unlocked = await CryptoEngine.unlockVault(pwd);
-        if (!unlocked) { if (!silent) toast('Invalid master password.'); return; }
+        remoteContacts = Array.isArray(payload) ? payload : payload.data;
       }
-      remoteContacts = await CryptoEngine.decrypt(payload);
-    } else {
-      remoteContacts = Array.isArray(payload) ? payload : payload.data;
+
+      if (Array.isArray(remoteContacts)) {
+        window.state.contacts = mergeContactsLWW(window.state.contacts, remoteContacts);
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(window.state.contacts));
+        renderDirectory();
+      }
     }
 
-    if (Array.isArray(remoteContacts)) {
-      window.state.contacts = mergeContactsLWW(window.state.contacts, remoteContacts);
-      saveAllToStorage();
-      renderDirectory();
-      if (!silent) toast('Synced with Google Drive.');
+    // 2. Push the merged result back up.
+    const pwd = els.masterPasswordInput.value.trim();
+    let uploadPayload;
+    if (pwd) {
+      if (!CryptoEngine.hasExistingVault()) await CryptoEngine.initializeVault(pwd);
+      else if (!CryptoEngine.isUnlocked() && !(await CryptoEngine.unlockVault(pwd))) {
+        if (!silent) toast('Invalid master password — synced local changes down, but could not push back up.');
+        updateSyncButtonState('error');
+        return;
+      }
+      uploadPayload = await CryptoEngine.encrypt(window.state.contacts);
+      uploadPayload.encrypted = true;
+    } else {
+      uploadPayload = { v: 1, encrypted: false, data: window.state.contacts };
     }
+    await GoogleDrive.uploadBackup(uploadPayload);
+
+    window.state.dirty = false;
+    localStorage.setItem(LAST_SYNC_KEY, String(Date.now()));
+    updateDriveUI();
+    updateSyncButtonState('synced');
+    if (!silent) toast('Synced with Google Drive.');
   } catch (err) {
     console.error(err);
-    if (!silent) toast('Load failed. Password might be wrong.');
+    updateSyncButtonState('error');
+    if (!silent) toast('Sync failed. Check console.');
   }
 }
 
 /** Called once on startup: if we've connected before, try to restore the
- * session without any popup. Does nothing (and shows nothing) if that fails —
- * failing silently here is the point, since most visitors have never
- * connected Drive at all. */
+ * session without any popup, then auto-run a full sync. Does nothing (and
+ * shows nothing) if that fails — failing silently here is the point, since
+ * most visitors have never connected Drive at all. */
 async function attemptSilentDriveLogin() {
   if (localStorage.getItem(DRIVE_CONNECTED_KEY) !== 'true') return;
   for (let i = 0; i < 20 && typeof google === 'undefined'; i++) {
@@ -178,7 +230,31 @@ async function attemptSilentDriveLogin() {
   const ok = await GoogleDrive.trySilentSignIn().catch(() => false);
   if (ok) {
     updateDriveUI();
-    await handleDriveLoad({ silent: true });
+    await runFullSync({ silent: true });
+  }
+}
+
+/**
+ * Best-effort flush when the tab is about to disappear (closed, backgrounded,
+ * navigated away). We can't reliably run the full download+merge+upload dance
+ * during unload, and we deliberately skip this for encrypted vaults (an
+ * in-flight WebCrypto operation racing a page teardown is worse than just
+ * relying on the next visit's auto-sync). For the plain-JSON case, a fetch
+ * with `keepalive: true` is used instead of sendBeacon, because keepalive
+ * fetches (unlike sendBeacon) support the Authorization header Drive needs.
+ * Local data itself is never at risk here — every edit already writes to
+ * localStorage synchronously; this only covers the Drive backup.
+ */
+async function flushOnHide() {
+  if (!window.state.dirty) return;
+  if (!GoogleDrive.isSignedIn()) return;
+  if (els.masterPasswordInput && els.masterPasswordInput.value.trim()) return; // encrypted: skip, too risky mid-unload
+  try {
+    await GoogleDrive.uploadBackup({ v: 1, encrypted: false, data: window.state.contacts }, { keepalive: true });
+    window.state.dirty = false;
+    localStorage.setItem(LAST_SYNC_KEY, String(Date.now()));
+  } catch (e) {
+    // best-effort only — nothing to do if this fails during teardown
   }
 }
 
@@ -202,22 +278,16 @@ function setAIRingState(active, thinking = false) {
   els.searchInputContainer.classList.toggle('ai-thinking', active && thinking);
 }
 
-// --- Semantic Worker System ---
+// --- Semantic Worker System (embedding-based search; runs everywhere, no GPU needed) ---
 function initSemanticWorker() {
   if (semanticWorker) return;
   try {
-    // Note: { type: 'module' } is required for dynamic CDN imports inside workers
     semanticWorker = new Worker('./semantic-worker.js', { type: 'module' });
     semanticWorker.onmessage = (e) => {
       const { type, results, message } = e.data;
       if (type === 'index-complete') {
         if (els.aiStatus && window.state.aiSearchEnabled) els.aiStatus.textContent = 'AI Model Ready';
       } else if (type === 'query-result') {
-        // Hybrid scoring: literal keyword hits get a boost on top of the semantic
-        // similarity score, and — crucially — the ranked order is preserved all
-        // the way to rendering (previously it was silently discarded and every
-        // result set got re-sorted alphabetically, which is why AI mode never
-        // looked any different from plain keyword search).
         const q = window.state.searchQuery.toLowerCase();
         const ranked = results
           .map((r) => {
@@ -236,6 +306,10 @@ function initSemanticWorker() {
         renderDirectoryWithFilter((c) => matchingIds.has(c.id), ranked.map((r) => r.id));
         setAIRingState(true, false);
         if (els.aiStatus) els.aiStatus.textContent = `Found ${matchingIds.size} semantic matches`;
+
+        // If this looked like a genuine question rather than a keyword
+        // search, hand the top matches to Gemma 3 for a direct answer.
+        maybeAskGemma(lastSemanticQueryText, ranked.slice(0, 8).map(r => r.id));
       } else if (type === 'error') {
         console.error("Worker error:", message);
         setAIRingState(true, false);
@@ -305,6 +379,7 @@ function handleSearchInput() {
 
   if (!query) {
     renderDirectory();
+    hideAIIsland();
     if (window.state.aiSearchEnabled) {
       setAIRingState(true, false);
       if (els.aiStatus) els.aiStatus.textContent = "AI Search Mode Active";
@@ -316,29 +391,104 @@ function handleSearchInput() {
     if (!semanticWorker) initSemanticWorker();
     setAIRingState(true, true);
     if (els.aiStatus) els.aiStatus.textContent = "Analyzing meanings...";
+    lastSemanticQueryText = query;
     semanticWorker.postMessage({ type: 'query', payload: { text: query, topK: 30 }, requestId: Date.now() });
   } else {
     renderDirectory();
   }
 }
 
+// --- Item 9: dynamic-island answer popup for genuine questions ---
+const QUESTION_PATTERN = /\?\s*$|^(who|what|when|where|why|how|is|are|does|do|can|should|which|count|list)\b/i;
+
+function looksLikeQuestion(text) {
+  return QUESTION_PATTERN.test(text.trim());
+}
+
+function showAIIsland(title) {
+  if (!els.aiIsland) return;
+  if (els.aiIslandTitle) els.aiIslandTitle.textContent = title || 'Gemma 3';
+  els.aiIsland.hidden = false;
+}
+function hideAIIsland() {
+  if (els.aiIsland) els.aiIsland.hidden = true;
+}
+
+let askInFlight = false;
+async function maybeAskGemma(queryText, topContactIds) {
+  if (!queryText || !looksLikeQuestion(queryText)) return;
+  if (!window.GemmaAI) return;
+  if (askInFlight) return;
+
+  if (!gemmaCapability) gemmaCapability = await window.GemmaAI.detectCapability();
+  if (!gemmaCapability.supported) {
+    toast(`Local AI answers aren't available on this device: ${gemmaCapability.reason}`);
+    return;
+  }
+
+  askInFlight = true;
+  showAIIsland('Gemma 3 — thinking…');
+  if (els.aiIslandBody) els.aiIslandBody.textContent = 'Reading matching contacts…';
+
+  try {
+    if (!window.GemmaAI.isLoaded()) {
+      if (els.aiIslandBody) els.aiIslandBody.textContent = 'Loading Gemma 3 on this device (first time only)…';
+      await window.GemmaAI.loadModel((pct) => {
+        if (els.aiIslandBody) els.aiIslandBody.textContent = `Loading Gemma 3… ${pct}%`;
+      });
+    }
+
+    const contacts = topContactIds
+      .map(id => window.state.contacts.find(c => c.id === id))
+      .filter(Boolean);
+    const context = contacts.map(c => {
+      const rels = (c.relationships || []).map(r => r.label).join(', ');
+      return `${c.fullName} — tags: ${(c.tags||[]).join(', ') || 'none'}; relations: ${rels || 'none'}; notes: ${c.notes || 'none'}`;
+    }).join('\n');
+
+    if (els.aiIslandTitle) els.aiIslandTitle.textContent = 'Gemma 3';
+    if (els.aiIslandBody) els.aiIslandBody.textContent = 'Thinking…';
+    const answer = await window.GemmaAI.answerQuestion(queryText, context);
+    if (els.aiIslandBody) els.aiIslandBody.textContent = answer || "I couldn't find that in your contacts.";
+  } catch (err) {
+    console.error(err);
+    if (els.aiIslandBody) els.aiIslandBody.textContent = 'Something went wrong generating an answer on this device.';
+  } finally {
+    askInFlight = false;
+  }
+}
+
+async function initGemmaCapabilityUI() {
+  if (!window.GemmaAI) return;
+  gemmaCapability = await window.GemmaAI.detectCapability();
+  if (els.aiCapabilityLine) {
+    els.aiCapabilityLine.textContent = gemmaCapability.supported
+      ? 'This device can run Gemma 3 locally for direct question answering (ask a full question in AI search mode).'
+      : `Not available on this device: ${gemmaCapability.reason} Semantic search still works normally.`;
+  }
+}
+
 // --- Rendering ---
 function populateFilterDropdowns() {
   const activeContacts = window.state.contacts.filter(c => !c.isDeleted);
+  if (!els.filterSelect) return;
 
-  if (els.tagFilter) {
-    const tags = Array.from(new Set(activeContacts.flatMap(c => c.tags || []))).sort((a, b) => a.localeCompare(b));
-    const prevTag = window.state.tagFilter;
-    els.tagFilter.innerHTML = '<option value="">All tags</option>' + tags.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('');
-    if (tags.includes(prevTag)) els.tagFilter.value = prevTag; else window.state.tagFilter = '';
-  }
+  const tags = Array.from(new Set(activeContacts.flatMap(c => c.tags || []))).sort((a, b) => a.localeCompare(b));
+  const prev = window.state.filterValue;
 
-  if (els.relationFilter) {
-    const prevRel = window.state.relationFilter;
-    els.relationFilter.innerHTML = '<option value="">All relationships</option>' + activeContacts
-      .map(c => `<option value="${c.id}">Related to ${escapeHtml(c.fullName)}</option>`).join('');
-    if (activeContacts.some(c => c.id === prevRel)) els.relationFilter.value = prevRel; else window.state.relationFilter = '';
+  let html = '<option value="">All contacts</option>';
+  if (tags.length) {
+    html += `<optgroup label="Tag">${tags.map(t => `<option value="tag:${escapeHtml(t)}">${escapeHtml(t)}</option>`).join('')}</optgroup>`;
   }
+  if (activeContacts.length) {
+    html += `<optgroup label="Related to">${activeContacts.map(c => `<option value="rel:${c.id}">${escapeHtml(c.fullName)}</option>`).join('')}</optgroup>`;
+  }
+  els.filterSelect.innerHTML = html;
+
+  const stillValid = prev === '' ||
+    (prev.startsWith('tag:') && tags.includes(prev.slice(4))) ||
+    (prev.startsWith('rel:') && activeContacts.some(c => c.id === prev.slice(4)));
+  if (stillValid) els.filterSelect.value = prev; else window.state.filterValue = '';
 }
 
 function renderDirectoryWithFilter(customFilter = null, rankedIds = null) {
@@ -350,9 +500,14 @@ function renderDirectoryWithFilter(customFilter = null, rankedIds = null) {
   } else {
     const q = window.state.searchQuery.toLowerCase();
     if (q) list = list.filter(c => c.fullName?.toLowerCase().includes(q) || c.notes?.toLowerCase().includes(q) || (c.tags || []).some(t => t.toLowerCase().includes(q)));
-    if (window.state.tagFilter) list = list.filter(c => (c.tags || []).includes(window.state.tagFilter));
     if (window.state.overdueOnly) list = list.filter(isOverdue);
-    if (window.state.relationFilter) list = list.filter(c => (c.relationships || []).some(r => r.targetContactId === window.state.relationFilter));
+    if (window.state.filterValue.startsWith('tag:')) {
+      const tag = window.state.filterValue.slice(4);
+      list = list.filter(c => (c.tags || []).includes(tag));
+    } else if (window.state.filterValue.startsWith('rel:')) {
+      const targetId = window.state.filterValue.slice(4);
+      list = list.filter(c => (c.relationships || []).some(r => r.targetContactId === targetId));
+    }
   }
   
   if (rankedIds) {
@@ -403,6 +558,7 @@ function renderDirectoryWithFilter(customFilter = null, rankedIds = null) {
 function renderDirectory() {
   renderDirectoryWithFilter(null);
   renderReports();
+  renderMergeSuggestions();
 }
 
 // --- Reports ---
@@ -482,6 +638,100 @@ function updatePfpUI() {
 }
 
 // --- Merge Contacts System ---
+function normalizeName(name) {
+  return (name || '').trim().toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ');
+}
+
+function levenshtein(a, b) {
+  const dp = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i][j] = a[i - 1] === b[j - 1]
+        ? dp[i - 1][j - 1]
+        : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
+    }
+  }
+  return dp[a.length][b.length];
+}
+
+/** Heuristic duplicate detection — every pair of active contacts is scored
+ * on name closeness plus any exact-matching phone/email, and the strongest
+ * matches are surfaced as one-click merge suggestions instead of requiring
+ * the person to manually hunt for duplicates in a dropdown. */
+function findDuplicateSuggestions() {
+  const active = window.state.contacts.filter(c => !c.isDeleted);
+  const suggestions = [];
+
+  for (let i = 0; i < active.length; i++) {
+    for (let j = i + 1; j < active.length; j++) {
+      const a = active[i], b = active[j];
+      const key = [a.id, b.id].sort().join('|');
+      if (window.state.dismissedMergePairs.has(key)) continue;
+
+      const nameA = normalizeName(a.fullName), nameB = normalizeName(b.fullName);
+      const reasons = [];
+      let score = 0;
+
+      if (nameA && nameA === nameB) { score += 0.7; reasons.push('same name'); }
+      else if (nameA && nameB) {
+        const dist = levenshtein(nameA, nameB);
+        const maxLen = Math.max(nameA.length, nameB.length);
+        if (maxLen > 0 && dist / maxLen <= 0.15) { score += 0.4; reasons.push('very similar name'); }
+      }
+
+      const methodsA = (a.contactMethods || []).map(m => m.value?.trim().toLowerCase()).filter(Boolean);
+      const methodsB = (b.contactMethods || []).map(m => m.value?.trim().toLowerCase()).filter(Boolean);
+      const sharedMethod = methodsA.find(m => methodsB.includes(m));
+      if (sharedMethod) { score += 0.5; reasons.push('same phone/email'); }
+
+      if (a.company && b.company && a.company.trim().toLowerCase() === b.company.trim().toLowerCase()
+          && a.jobTitle && b.jobTitle && a.jobTitle.trim().toLowerCase() === b.jobTitle.trim().toLowerCase()) {
+        score += 0.2; reasons.push('same company & role');
+      }
+
+      if (score >= 0.5) {
+        suggestions.push({ a, b, score, reasons, key });
+      }
+    }
+  }
+
+  return suggestions.sort((x, y) => y.score - x.score).slice(0, 5);
+}
+
+function renderMergeSuggestions() {
+  if (!els.mergeSuggestions) return;
+  const suggestions = findDuplicateSuggestions();
+
+  if (!suggestions.length) { els.mergeSuggestions.innerHTML = ''; return; }
+
+  els.mergeSuggestions.innerHTML = suggestions.map(s => `
+    <div class="merge-suggestion-card" data-key="${s.key}">
+      <div class="merge-suggestion-text">
+        <strong>${escapeHtml(s.a.fullName)}</strong> and <strong>${escapeHtml(s.b.fullName)}</strong> look like the same person
+        <span class="merge-suggestion-reason">${escapeHtml(s.reasons.join(', '))}</span>
+      </div>
+      <div class="merge-suggestion-actions">
+        <button type="button" class="btn btn-primary btn-small" data-quick-merge="${s.a.id}|${s.b.id}">Merge</button>
+        <button type="button" class="btn btn-ghost btn-small" data-dismiss-suggestion="${s.key}">Dismiss</button>
+      </div>
+    </div>
+  `).join('');
+
+  els.mergeSuggestions.querySelectorAll('[data-quick-merge]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const [pId, sId] = btn.dataset.quickMerge.split('|');
+      executeMergeContacts(pId, sId);
+    });
+  });
+  els.mergeSuggestions.querySelectorAll('[data-dismiss-suggestion]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      window.state.dismissedMergePairs.add(btn.dataset.dismissSuggestion);
+      renderMergeSuggestions();
+    });
+  });
+}
+
 function openMergeModal() {
   const activeContacts = window.state.contacts.filter(c => !c.isDeleted);
   if (activeContacts.length < 2) return toast("Need at least 2 contacts to merge.");
@@ -494,9 +744,9 @@ function openMergeModal() {
   els.mergeModal.hidden = false;
 }
 
-function executeMerge() {
-  const pId = els.mergePrimarySelect.value;
-  const sId = els.mergeSecondarySelect.value;
+/** Core merge logic, shared by the manual merge modal and the one-click
+ * auto-merge suggestions above. */
+function executeMergeContacts(pId, sId) {
   if (pId === sId) return toast("Primary and secondary contact must be different.");
 
   const primary = window.state.contacts.find(c => c.id === pId);
@@ -507,7 +757,7 @@ function executeMerge() {
   primary.contactMethods = [...(primary.contactMethods || []), ...(secondary.contactMethods || [])];
   primary.interactions = [...(primary.interactions || []), ...(secondary.interactions || [])];
   primary.relationships = [...(primary.relationships || []), ...(secondary.relationships || [])]
-    .filter(r => r.targetContactId !== pId && r.targetContactId !== sId); // drop self-links
+    .filter(r => r.targetContactId !== pId && r.targetContactId !== sId);
   primary.pfpBase64 = primary.pfpBase64 || secondary.pfpBase64;
   if (!primary.frequencyGoalDays && secondary.frequencyGoalDays) {
     primary.frequencyGoalValue = secondary.frequencyGoalValue;
@@ -522,13 +772,11 @@ function executeMerge() {
     primary.notes = (primary.notes ? primary.notes + '\n\n' : '') + `[Merged Note from ${secondary.fullName}]:\n` + secondary.notes;
   }
 
-  // Repoint any other contact's relationships that pointed at the removed contact,
-  // so those links don't silently vanish (they used to just dangle and disappear).
   window.state.contacts.forEach(c => {
     if (c.id === pId || c.id === sId || !c.relationships) return;
     c.relationships = c.relationships
       .map(r => r.targetContactId === sId ? { ...r, targetContactId: pId } : r)
-      .filter(r => r.targetContactId !== c.id); // avoid accidental self-link after repoint
+      .filter(r => r.targetContactId !== c.id);
   });
 
   primary.updatedAt = Date.now();
@@ -537,7 +785,7 @@ function executeMerge() {
 
   saveAllToStorage();
   renderDirectory();
-  els.mergeModal.hidden = true;
+  if (els.mergeModal) els.mergeModal.hidden = true;
   toast(`Merged ${secondary.fullName} into ${primary.fullName}`);
 }
 
@@ -616,8 +864,6 @@ function saveContactFromModal() {
   if (window.state.activeView === 'network' && window.renderNetworkMap) window.renderNetworkMap(window.state.contacts);
 }
 
-// Ensures that if A links to B, B also shows a link back to A (relationships were
-// previously one-directional: editing B never revealed the link A had made to it).
 function syncReciprocalRelationships(contact) {
   const linkedIds = new Set((contact.relationships || []).map(r => r.targetContactId));
 
@@ -690,7 +936,7 @@ function saveQuickInteraction() {
   toast(`Logged interaction with ${contact.fullName}.`);
 }
 
-// --- Process Imported vCards ---
+// --- Process Imported vCards (folds straight into the same synced contact list) ---
 function processVCardFile(file) {
   if (!file) return;
   const reader = new FileReader();
@@ -700,7 +946,9 @@ function processVCardFile(file) {
       if (!parsed || parsed.length === 0) throw new Error("No contacts found in vCard file.");
       parsed.forEach(c => { c.id = uuid(); c.updatedAt = Date.now(); c.isDeleted = false; window.state.contacts.push(c); });
       saveAllToStorage(); renderDirectory();
-      toast(`Imported ${parsed.length} contact(s)!`);
+      toast(GoogleDrive.isSignedIn()
+        ? `Imported ${parsed.length} contact(s) — will go up on next sync.`
+        : `Imported ${parsed.length} contact(s)!`);
     } catch (err) { console.error(err); toast("Failed to parse vCard file."); }
   };
   reader.readAsText(file);
@@ -709,6 +957,7 @@ function processVCardFile(file) {
 // --- Init & Events ---
 document.addEventListener('DOMContentLoaded', () => {
   cacheEls(); loadAllFromStorage(); renderDirectory();
+  initGemmaCapabilityUI();
 
   if (els.settingsBtn) els.settingsBtn.addEventListener('click', () => { els.settingsModal.hidden = false; });
   if (els.wipeLocalBtn) els.wipeLocalBtn.addEventListener('click', () => {
@@ -718,24 +967,33 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // Search & AI Toggle
-  if (els.globalSearch) els.globalSearch.addEventListener('input', handleSearchInput);
+  if (els.globalSearch) {
+    els.globalSearch.addEventListener('input', handleSearchInput);
+    els.globalSearch.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && window.state.aiSearchEnabled && window.state.searchQuery) {
+        lastSemanticQueryText = window.state.searchQuery;
+        maybeAskGemma(window.state.searchQuery, window.state.contacts.filter(c => !c.isDeleted).slice(0, 8).map(c => c.id));
+      }
+    });
+  }
   if (els.aiToggleBtn) els.aiToggleBtn.addEventListener('click', toggleAISearchMode);
+  if (els.aiIslandClose) els.aiIslandClose.addEventListener('click', hideAIIsland);
 
-  // Filter bar (previously had no listeners at all — dropdowns were unpopulated and inert)
-  if (els.tagFilter) els.tagFilter.addEventListener('change', () => { window.state.tagFilter = els.tagFilter.value; renderDirectory(); });
-  if (els.relationFilter) els.relationFilter.addEventListener('change', () => { window.state.relationFilter = els.relationFilter.value; renderDirectory(); });
+  // Filter bar (single combined filter + overdue toggle)
+  if (els.filterSelect) els.filterSelect.addEventListener('change', () => { window.state.filterValue = els.filterSelect.value; renderDirectory(); });
   if (els.overdueFilterBtn) els.overdueFilterBtn.addEventListener('click', () => {
     window.state.overdueOnly = !window.state.overdueOnly;
     els.overdueFilterBtn.dataset.active = String(window.state.overdueOnly);
     renderDirectory();
   });
 
-  // Export (previously unwired)
+  // Export
   if (els.exportRawBtn) els.exportRawBtn.addEventListener('click', exportRawJson);
   if (els.exportCsvBtn) els.exportCsvBtn.addEventListener('click', exportCsv);
 
-  // Google Drive Handlers
+  // Google Drive — one unified Sync action, in both the header button and the Sync tab
   updateDriveUI();
+  updateSyncButtonState();
   if (els.gdriveLoginBtn) els.gdriveLoginBtn.addEventListener('click', async () => {
     if (GoogleDrive.isSignedIn()) {
       if (!confirm('Disconnect Google Drive? Your local contacts stay right where they are.')) return;
@@ -750,16 +1008,23 @@ document.addEventListener('DOMContentLoaded', () => {
       localStorage.setItem(DRIVE_CONNECTED_KEY, 'true');
       updateDriveUI();
       toast('Logged into Google Drive!');
-      await handleDriveLoad();
+      await runFullSync();
     } catch (e) { toast('Drive login failed: ' + e.message); console.error(e); }
   });
-  if (els.gdriveSyncBtn) els.gdriveSyncBtn.addEventListener('click', handleDriveSync);
-  if (els.gdriveLoadBtn) els.gdriveLoadBtn.addEventListener('click', () => handleDriveLoad());
+  if (els.gdriveSyncBtn) els.gdriveSyncBtn.addEventListener('click', () => runFullSync());
+  if (els.syncBtn) els.syncBtn.addEventListener('click', () => {
+    if (!GoogleDrive.isSignedIn()) { els.settingsModal.hidden = true; document.querySelector('[data-view="import"]').click(); toast('Connect Google Drive first, on the Sync tab.'); return; }
+    runFullSync();
+  });
   attemptSilentDriveLogin();
+
+  // Best-effort save-before-close (see flushOnHide for what this can and can't do)
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushOnHide(); });
+  window.addEventListener('pagehide', flushOnHide);
 
   // Merge Feature Handlers
   if (els.mergeContactsBtn) els.mergeContactsBtn.addEventListener('click', openMergeModal);
-  if (els.confirmMergeBtn) els.confirmMergeBtn.addEventListener('click', executeMerge);
+  if (els.confirmMergeBtn) els.confirmMergeBtn.addEventListener('click', () => executeMergeContacts(els.mergePrimarySelect.value, els.mergeSecondarySelect.value));
 
   // vCard File Upload & Dropzone Handlers
   if (els.triggerVcfBtn) els.triggerVcfBtn.addEventListener('click', (e) => { e.stopPropagation(); els.vcfInput.click(); });
@@ -823,8 +1088,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!deleted) return;
     deleted.isDeleted = true;
     deleted.updatedAt = Date.now();
-    // Clean up other contacts' relationship links that pointed at this contact,
-    // so they don't show a dangling "(deleted contact)" reference.
     window.state.contacts.forEach(c => {
       if (c.id === deletedId || !c.relationships) return;
       const before = c.relationships.length;

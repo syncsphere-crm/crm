@@ -1,86 +1,128 @@
 /**
- * ai.js - Local Browser AI
- * Uses SmolLM-135M-Instruct (~85MB), an incredibly smart, tiny instruction model.
+ * ai.js — Local Gemma 3 inference (on-device, no server calls)
+ *
+ * Uses Google's Gemma 3 1B instruction model, 4-bit quantized, run entirely
+ * in the browser via WebGPU (onnx-community/gemma-3-1b-it-ONNX + transformers.js).
+ *
+ * IMPORTANT NOTE ON SCOPE — read before changing MODEL_ID:
+ * A real "Gemma 3 4B" build (onnx-community/gemma-3-4b-it-ONNX) does exist,
+ * but it's a vision+text multimodal export meant for server/native ONNX
+ * Runtime, not the transformers.js in-browser pipeline — and even quantized
+ * it's several GB, which is a rough download for a small local-first CRM.
+ * The 1B build below is confirmed to run through transformers.js on WebGPU
+ * at a much more reasonable footprint (~1GB, 4-bit). If your target devices
+ * and hosting can absorb the bigger download, swapping MODEL_ID to the 4B
+ * multimodal repo would require switching from the text-generation pipeline
+ * to AutoModelForImageTextToText — a bigger rewrite than a constant change.
+ *
+ * Browsers cannot address a device's NPU directly — there's no public web
+ * API for that today. WebGPU (GPU / unified memory) is the real browser-side
+ * acceleration path, so that's what capability detection below checks for.
  */
 
-import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1';
+import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.1';
 
-// Fix for model downloading correctly
 env.allowLocalModels = false;
-env.backends.onnx.wasm.numThreads = 1; 
-env.backends.onnx.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1/dist/';
+
+const MODEL_ID = 'onnx-community/gemma-3-1b-it-ONNX';
 
 let generator = null;
+let loadingPromise = null;
+let capabilityCache = null;
 
-async function loadModel() {
-  const statusEl = document.getElementById('aiStatus');
-  if (statusEl) statusEl.textContent = "Downloading AI Model (One-time, ~85MB)...";
-  
+/**
+ * Two-step detection: (1) does the browser expose navigator.gpu at all,
+ * (2) does requestAdapter() actually resolve to a usable adapter (it can
+ * return null on blocklisted drivers, remote desktops, some VMs, etc).
+ * A low navigator.deviceMemory reading is an extra, coarse signal that the
+ * device likely can't hold the model + KV cache comfortably.
+ */
+export async function detectCapability() {
+  if (capabilityCache) return capabilityCache;
+
+  if (!('gpu' in navigator)) {
+    capabilityCache = { supported: false, reason: "This browser doesn't support WebGPU, which on-device Gemma 3 needs." };
+    return capabilityCache;
+  }
   try {
-    generator = await pipeline('text-generation', 'Xenova/SmolLM-135M-Instruct');
-    if (statusEl) {
-        statusEl.textContent = "AI Ready.";
-        setTimeout(() => { statusEl.textContent = ""; }, 3000);
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+      capabilityCache = { supported: false, reason: "No usable GPU adapter was found on this device/browser." };
+      return capabilityCache;
     }
-  } catch (err) {
-    console.error(err);
-    if (statusEl) statusEl.textContent = "Failed to load model.";
-    document.getElementById('aiSearchBtn').disabled = false;
+    if (navigator.deviceMemory && navigator.deviceMemory < 4) {
+      capabilityCache = { supported: false, reason: "This device doesn't have enough memory to run Gemma 3 locally." };
+      return capabilityCache;
+    }
+    capabilityCache = { supported: true };
+    return capabilityCache;
+  } catch (e) {
+    capabilityCache = { supported: false, reason: "Couldn't initialize WebGPU on this device." };
+    return capabilityCache;
   }
 }
 
-document.getElementById('aiSearchBtn').addEventListener('click', async () => {
-  const query = document.getElementById('globalSearch').value.trim();
-  if (!query) { alert("Enter a question in the search bar first."); return; }
+export function isLoaded() {
+  return !!generator;
+}
 
-  const btn = document.getElementById('aiSearchBtn');
-  btn.disabled = true;
-  btn.textContent = "Thinking...";
+export async function loadModel(onProgress) {
+  if (generator) return generator;
+  if (loadingPromise) return loadingPromise;
 
-  if (!generator) {
-    await loadModel();
+  const capability = await detectCapability();
+  if (!capability.supported) throw new Error(capability.reason);
+
+  loadingPromise = (async () => {
+    generator = await pipeline('text-generation', MODEL_ID, {
+      dtype: 'q4',
+      device: 'webgpu',
+      progress_callback: (p) => {
+        if (onProgress && p.status === 'progress' && p.file) {
+          onProgress(Math.round(p.progress || 0), p.file);
+        }
+      },
+    });
+    return generator;
+  })();
+
+  try {
+    return await loadingPromise;
+  } catch (err) {
+    loadingPromise = null;
+    generator = null;
+    throw err;
   }
+}
 
-  if (generator) {
-    const activeContacts = (window.state.contacts || []).filter(c => !c.isDeleted);
-    
-    const dataString = activeContacts.map(c => {
-      const rels = (c.relationships||[]).map(r => r.label).join(', ');
-      return `Name: ${c.fullName} | Tags: ${(c.tags||[]).join(', ')} | Relations: ${rels||'none'} | Notes: ${c.notes||'none'}`;
-    }).join('\n');
-    
-    const systemPrompt = "You are an AI assistant for a CRM. Answer the user's question accurately based ONLY on the provided contact data. If the answer is not in the data, say 'I don't know'.";
-    
-    const messages = [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: `Contact Data:\n${dataString}\n\nQuestion: ${query}` }
-    ];
+/**
+ * Generates a short answer grounded only in the contact data handed in.
+ * Kept deliberately short (contacts data + short reply) since this all runs
+ * on-device with no server round trip to fall back on for a long context.
+ */
+export async function answerQuestion(question, contactsContext) {
+  if (!generator) throw new Error('Model not loaded yet.');
 
-    try {
-      const prompt = generator.tokenizer.apply_chat_template(messages, { 
-        tokenize: false, 
-        add_generation_prompt: true 
-      });
+  const messages = [
+    {
+      role: 'system',
+      content: "You are a helpful assistant for a personal CRM. Answer the user's question in 1-3 short sentences, using ONLY the contact data provided. If the answer isn't in the data, say you don't know.",
+    },
+    { role: 'user', content: `Contact data:\n${contactsContext}\n\nQuestion: ${question}` },
+  ];
 
-      const result = await generator(prompt, {
-        max_new_tokens: 80,
-        temperature: 0.1,
-        repetition_penalty: 1.15
-      });
-      
-      const generatedText = result[0].generated_text;
-      const answerStart = generatedText.lastIndexOf("<|im_start|>assistant\n");
-      const cleanAnswer = answerStart !== -1 
-        ? generatedText.substring(answerStart + 22).replace("<|im_end|>", "").trim()
-        : generatedText;
+  const output = await generator(messages, {
+    max_new_tokens: 120,
+    temperature: 0.2,
+    do_sample: false,
+  });
 
-      alert(`✨ AI Answer:\n\n${cleanAnswer}`);
-    } catch (e) {
-      console.error(e);
-      alert("Error generating response. The context might be too long for the browser memory.");
-    }
+  const reply = output[0]?.generated_text;
+  if (Array.isArray(reply)) {
+    const last = reply[reply.length - 1];
+    return (last?.content || '').trim();
   }
+  return String(reply || '').trim();
+}
 
-  btn.disabled = false;
-  btn.textContent = "✨ Ask AI";
-});
+window.GemmaAI = { detectCapability, isLoaded, loadModel, answerQuestion };
