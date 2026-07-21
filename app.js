@@ -10,6 +10,7 @@ window.state = {
   relationFilter: '',
   overdueOnly: false,
   searchQuery: '',
+  aiSearchEnabled: false,
   handleRowsDraft: [],
   relationRowsDraft: [],
   interactionsDraft: [],
@@ -17,7 +18,13 @@ window.state = {
 };
 
 let semanticWorker = null;
-let isWorkerIndexing = false;
+let promptInterval = null;
+const EXAMPLE_PROMPTS = [
+  '✨ Try: "Who works at Google?"',
+  '✨ Try: "Friends from college"',
+  '✨ Try: "Software developer in NYC"',
+  '✨ Try: "Notes about coffee or lunch"'
+];
 
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11));
 
@@ -35,14 +42,14 @@ function cacheEls() {
   const ids = [
     'globalSearch','settingsBtn','contactGrid','emptyState','tagFilter',
     'overdueFilterBtn','relationFilter','resultCount','addContactBtn','reportOverdue',
-    'reportTags','exportRawBtn','exportCsvBtn','dropZone','vcfInput','contactModal',
+    'reportTags','exportRawBtn','exportCsvBtn','dropZone','triggerVcfBtn','vcfInput','contactModal',
     'contactModalTitle','contactId','fullNameInput','tagsInput','frequencyInput', 'frequencyUnitInput',
     'handleRows','addHandleBtn','relationRows','relationTargetSelect','relationLabelInput',
     'addRelationBtn','notesInput','addInteractionBtn','interactionList','deleteContactBtn',
     'saveContactBtn','interactionModal','quickInteractionContactId','quickChannelInput',
     'quickSummaryInput','saveQuickInteractionBtn','settingsModal','wipeLocalBtn',
     'pfpInput', 'pfpPreview', 'pfpImg', 'pfpInitial', 'removePfpBtn',
-    'gdriveLoginBtn', 'gdriveSyncBtn', 'masterPasswordInput', 'aiSearchBtn', 'aiStatus',
+    'gdriveLoginBtn', 'gdriveSyncBtn', 'masterPasswordInput', 'aiToggleBtn', 'aiStatus',
     'mergeContactsBtn', 'mergeModal', 'mergePrimarySelect', 'mergeSecondarySelect', 'confirmMergeBtn'
   ];
   ids.forEach((id) => { 
@@ -130,24 +137,27 @@ function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// --- Semantic Search System ---
+// --- Semantic Worker System ---
 function initSemanticWorker() {
   if (semanticWorker) return;
   try {
-    semanticWorker = new Worker('./semantic-worker.js');
+    // Note: { type: 'module' } is required for dynamic CDN imports inside workers
+    semanticWorker = new Worker('./semantic-worker.js', { type: 'module' });
     semanticWorker.onmessage = (e) => {
-      const { type, results } = e.data;
+      const { type, results, message } = e.data;
       if (type === 'index-complete') {
-        isWorkerIndexing = false;
-        if (els.aiStatus) els.aiStatus.textContent = '';
+        if (els.aiStatus && window.state.aiSearchEnabled) els.aiStatus.textContent = 'AI Model Ready';
       } else if (type === 'query-result') {
         const matchingIds = new Set(results.filter(r => r.score > 0.25).map(r => r.id));
         renderDirectoryWithFilter((c) => matchingIds.has(c.id));
         if (els.aiStatus) els.aiStatus.textContent = `Found ${matchingIds.size} semantic matches`;
+      } else if (type === 'error') {
+        console.error("Worker error:", message);
+        if (els.aiStatus) els.aiStatus.textContent = 'AI Search error';
       }
     };
   } catch (err) {
-    console.warn("Semantic worker could not be initialized:", err);
+    console.warn("Semantic worker initialization failed:", err);
   }
 }
 
@@ -155,7 +165,6 @@ function indexSemanticSearch() {
   if (!semanticWorker) initSemanticWorker();
   if (!semanticWorker) return;
   
-  isWorkerIndexing = true;
   const docs = window.state.contacts.filter(c => !c.isDeleted).map(c => ({
     id: c.id,
     text: `Name: ${c.fullName}. Tags: ${(c.tags||[]).join(' ')}. Notes: ${c.notes || ''}`
@@ -164,13 +173,49 @@ function indexSemanticSearch() {
   semanticWorker.postMessage({ type: 'index', payload: docs, requestId: Date.now() });
 }
 
-function executeAISearch() {
+function toggleAISearchMode() {
+  window.state.aiSearchEnabled = !window.state.aiSearchEnabled;
+  if (els.aiToggleBtn) {
+    els.aiToggleBtn.classList.toggle('active', window.state.aiSearchEnabled);
+  }
+
+  clearInterval(promptInterval);
+
+  if (window.state.aiSearchEnabled) {
+    if (!semanticWorker) initSemanticWorker();
+    indexSemanticSearch();
+    if (els.aiStatus) els.aiStatus.textContent = "AI Search Mode Active";
+    
+    let promptIdx = 0;
+    els.globalSearch.placeholder = EXAMPLE_PROMPTS[0];
+    promptInterval = setInterval(() => {
+      promptIdx = (promptIdx + 1) % EXAMPLE_PROMPTS.length;
+      els.globalSearch.placeholder = EXAMPLE_PROMPTS[promptIdx];
+    }, 3000);
+  } else {
+    els.globalSearch.placeholder = "Search names, notes, tags…";
+    if (els.aiStatus) els.aiStatus.textContent = "";
+    renderDirectory();
+  }
+}
+
+function handleSearchInput() {
   const query = els.globalSearch.value.trim();
-  if (!query) return renderDirectory();
-  
-  if (!semanticWorker) initSemanticWorker();
-  if (els.aiStatus) els.aiStatus.textContent = "Searching vectors...";
-  semanticWorker.postMessage({ type: 'query', payload: { text: query, topK: 20 }, requestId: Date.now() });
+  window.state.searchQuery = query;
+
+  if (!query) {
+    renderDirectory();
+    if (window.state.aiSearchEnabled && els.aiStatus) els.aiStatus.textContent = "AI Search Mode Active";
+    return;
+  }
+
+  if (window.state.aiSearchEnabled) {
+    if (!semanticWorker) initSemanticWorker();
+    if (els.aiStatus) els.aiStatus.textContent = "Analyzing meanings...";
+    semanticWorker.postMessage({ type: 'query', payload: { text: query, topK: 20 }, requestId: Date.now() });
+  } else {
+    renderDirectory();
+  }
 }
 
 // --- Rendering ---
@@ -253,13 +298,12 @@ function openMergeModal() {
 function executeMerge() {
   const pId = els.mergePrimarySelect.value;
   const sId = els.mergeSecondarySelect.value;
-  if (pId === sId) return toast("Primary and Secondary contact must be different.");
+  if (pId === sId) return toast("Primary and secondary contact must be different.");
 
   const primary = window.state.contacts.find(c => c.id === pId);
   const secondary = window.state.contacts.find(c => c.id === sId);
   if (!primary || !secondary) return;
 
-  // Combine properties
   primary.tags = Array.from(new Set([...(primary.tags || []), ...(secondary.tags || [])]));
   primary.contactMethods = [...(primary.contactMethods || []), ...(secondary.contactMethods || [])];
   primary.interactions = [...(primary.interactions || []), ...(secondary.interactions || [])];
@@ -269,7 +313,6 @@ function executeMerge() {
     primary.notes = (primary.notes ? primary.notes + '\n\n' : '') + `[Merged Note from ${secondary.fullName}]:\n` + secondary.notes;
   }
 
-  // Soft delete secondary
   secondary.isDeleted = true;
 
   saveAllToStorage();
@@ -386,17 +429,18 @@ function processVCardFile(file) {
   reader.onload = (ev) => { 
     try {
       const parsed = VCardParser.parse(ev.target.result);
+      if (!parsed || parsed.length === 0) throw new Error("No contacts found in vCard file.");
       parsed.forEach(c => { c.id = uuid(); window.state.contacts.push(c); });
       saveAllToStorage(); renderDirectory();
-      toast(`Imported ${parsed.length} contacts!`);
-    } catch (err) { console.error(err); toast("Failed to parse vCard."); }
+      toast(`Imported ${parsed.length} contact(s)!`);
+    } catch (err) { console.error(err); toast("Failed to parse vCard file."); }
   };
   reader.readAsText(file);
 }
 
 // --- Init & Events ---
 document.addEventListener('DOMContentLoaded', () => {
-  cacheEls(); loadAllFromStorage(); renderDirectory(); indexSemanticSearch();
+  cacheEls(); loadAllFromStorage(); renderDirectory();
 
   if (els.settingsBtn) els.settingsBtn.addEventListener('click', () => { els.settingsModal.hidden = false; });
   if (els.wipeLocalBtn) els.wipeLocalBtn.addEventListener('click', () => {
@@ -405,21 +449,18 @@ document.addEventListener('DOMContentLoaded', () => {
     renderDirectory(); els.settingsModal.hidden = true; toast("Erased.");
   });
 
-  // Search
-  if (els.globalSearch) els.globalSearch.addEventListener('input', (e) => {
-    window.state.searchQuery = e.target.value;
-    renderDirectory();
-  });
-  if (els.aiSearchBtn) els.aiSearchBtn.addEventListener('click', executeAISearch);
+  // Search & AI Toggle
+  if (els.globalSearch) els.globalSearch.addEventListener('input', handleSearchInput);
+  if (els.aiToggleBtn) els.aiToggleBtn.addEventListener('click', toggleAISearchMode);
 
-  // GDrive Login & Sync Handlers
+  // Google Drive Handlers
   if (els.gdriveLoginBtn) els.gdriveLoginBtn.addEventListener('click', async () => {
     try {
       await GoogleDrive.signIn();
       toast('Logged into Google Drive!');
       els.gdriveLoginBtn.textContent = 'Drive: Authenticated';
       handleDriveLoad();
-    } catch (e) { toast('Drive login failed.'); console.error(e); }
+    } catch (e) { toast('Drive login failed: ' + e.message); console.error(e); }
   });
   if (els.gdriveSyncBtn) els.gdriveSyncBtn.addEventListener('click', handleDriveSync);
 
@@ -427,9 +468,11 @@ document.addEventListener('DOMContentLoaded', () => {
   if (els.mergeContactsBtn) els.mergeContactsBtn.addEventListener('click', openMergeModal);
   if (els.confirmMergeBtn) els.confirmMergeBtn.addEventListener('click', executeMerge);
 
-  // File Upload and Dropzone Handlers
+  // vCard File Upload & Dropzone Handlers
+  if (els.triggerVcfBtn) els.triggerVcfBtn.addEventListener('click', (e) => { e.stopPropagation(); els.vcfInput.click(); });
   if (els.vcfInput) els.vcfInput.addEventListener('change', (e) => processVCardFile(e.target.files[0]));
   if (els.dropZone) {
+    els.dropZone.addEventListener('click', () => els.vcfInput.click());
     els.dropZone.addEventListener('dragover', (e) => { e.preventDefault(); els.dropZone.classList.add('drag-over'); });
     els.dropZone.addEventListener('dragleave', () => els.dropZone.classList.remove('drag-over'));
     els.dropZone.addEventListener('drop', (e) => {
@@ -439,7 +482,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // PFP File Reader
+  // Profile Photo Reader
   if (els.pfpInput) els.pfpInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -462,7 +505,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // Modal Actions
+  // Modal Buttons
   if (els.addContactBtn) els.addContactBtn.addEventListener('click', () => openContactModal(null));
   if (els.saveContactBtn) els.saveContactBtn.addEventListener('click', saveContactFromModal);
   if (els.addHandleBtn) els.addHandleBtn.addEventListener('click', () => { window.state.handleRowsDraft.push({ value: '' }); renderHandleRows(); });

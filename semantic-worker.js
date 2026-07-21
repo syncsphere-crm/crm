@@ -1,14 +1,10 @@
 /**
  * semantic-worker.js
- * Runs entirely off the main thread. Lazily loads Transformers.js and the
- * all-MiniLM-L6-v2 sentence embedding model (~25MB, cached by the browser
- * after first load) to provide semantic similarity search over contact
- * notes. Falls back gracefully — app.js only calls this when the user
- * enables "AI search", so keyword search (Fuse.js) always works offline.
+ * Browser worker for vector similarity search via Transformers.js
  */
 
 let extractorPromise = null;
-let corpus = []; // [{ id, text, embedding }]
+let corpus = [];
 
 function cosineSimilarity(a, b) {
   let dot = 0, normA = 0, normB = 0;
@@ -23,9 +19,8 @@ function cosineSimilarity(a, b) {
 async function getExtractor() {
   if (!extractorPromise) {
     extractorPromise = (async () => {
-      const { pipeline } = await import(
-        'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1'
-      );
+      const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1');
+      env.allowLocalModels = false;
       return pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
     })();
   }
@@ -42,16 +37,19 @@ self.onmessage = async (e) => {
   const { type, payload, requestId } = e.data;
   try {
     if (type === 'index') {
-      // payload: [{ id, text }]
       const results = [];
       for (const item of payload) {
-        const embedding = await embed(item.text || '');
+        if (!item.text || !item.text.trim()) continue;
+        const embedding = await embed(item.text);
         results.push({ id: item.id, embedding });
       }
       corpus = results;
       self.postMessage({ type: 'index-complete', requestId, count: results.length });
     } else if (type === 'query') {
-      // payload: { text, topK }
+      if (!payload.text || !payload.text.trim()) {
+        self.postMessage({ type: 'query-result', requestId, results: [] });
+        return;
+      }
       const queryEmbedding = await embed(payload.text);
       const scored = corpus
         .map((c) => ({ id: c.id, score: cosineSimilarity(queryEmbedding, c.embedding) }))

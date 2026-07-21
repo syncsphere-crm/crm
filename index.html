@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SyncSphere — Personal CRM</title>
 <link rel="stylesheet" href="./styles.css">
+<!-- Google Identity Services Library required for Google Drive OAuth -->
+<script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   * { transition: background-color 0.15s ease, border-color 0.15s ease; }
   
@@ -29,10 +31,30 @@
   .btn:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.05); }
   .btn:active:not(:disabled) { transform: translateY(1px); filter: brightness(0.95); }
   
-  .search-wrap { display: flex; gap: 8px; flex: 1; max-width: 600px; }
-  .search-input { flex: 1; }
-  #aiStatus { font-size: 11px; color: #64748b; margin-top: 4px; display: block; position: absolute; }
+  .search-wrap { display: flex; flex-direction: column; flex: 1; max-width: 600px; position: relative; }
+  .search-input-container { position: relative; display: flex; align-items: center; width: 100%; }
+  .search-input-container .search-input { width: 100%; padding-right: 42px; }
   
+  .ai-toggle-btn {
+    position: absolute;
+    right: 8px;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    font-size: 18px;
+    padding: 4px 6px;
+    border-radius: 6px;
+    opacity: 0.4;
+    transition: all 0.2s ease;
+  }
+  .ai-toggle-btn:hover { opacity: 0.8; background: rgba(0,0,0,0.05); }
+  .ai-toggle-btn.active { opacity: 1; background: #e0e7ff; filter: drop-shadow(0 0 2px #6366f1); transform: scale(1.05); }
+  
+  #aiStatus { font-size: 11px; color: #6366f1; margin-top: 2px; font-weight: 500; min-height: 14px; }
+  
+  .drop-zone { cursor: pointer; border: 2px dashed #cbd5e1; border-radius: 8px; padding: 32px; text-align: center; transition: all 0.2s; }
+  .drop-zone.drag-over { border-color: #6366f1; background: #f5f3ff; }
+
   .form-row-pfp { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
   .pfp-preview { width: 64px; height: 64px; border-radius: 50%; background: #e2e8f0; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #64748b; font-weight: 600; overflow: hidden; border: 2px solid #cbd5e1; }
   .pfp-preview img { width: 100%; height: 100%; object-fit: cover; }
@@ -43,11 +65,6 @@
   .network-controls { position: absolute; bottom: 16px; right: 16px; display: flex; gap: 8px; }
   
   .interaction-actions { display: flex; gap: 8px; margin-top: 6px; }
-  
-  .contact-card:nth-child(1) { animation-delay: 0.05s; }
-  .contact-card:nth-child(2) { animation-delay: 0.10s; }
-  .contact-card:nth-child(3) { animation-delay: 0.15s; }
-  .contact-card:nth-child(4) { animation-delay: 0.20s; }
 </style>
 </head>
 <body>
@@ -57,11 +74,11 @@
     <div class="topbar-row">
       <div class="brand">SyncSphere</div>
       <div class="search-wrap">
-        <div style="flex:1; position: relative;">
+        <div class="search-input-container">
           <input type="search" id="globalSearch" class="search-input" placeholder="Search names, notes, tags…">
-          <span id="aiStatus"></span>
+          <button type="button" id="aiToggleBtn" class="ai-toggle-btn" title="Toggle AI Semantic Search">✨</button>
         </div>
-        <button type="button" id="aiSearchBtn" class="btn btn-secondary">✨ AI Search</button>
+        <span id="aiStatus"></span>
       </div>
       <div class="topbar-actions">
         <button type="button" id="settingsBtn" class="btn btn-icon" title="Settings">⚙️</button>
@@ -118,11 +135,9 @@
       <div class="import-card">
         <h3>Import from vCard (.vcf)</h3>
         <div id="dropZone" class="drop-zone">
-          <p>Drag & drop .vcf files here</p>
-          <label class="btn btn-secondary file-label">
-            Choose file
-            <input type="file" id="vcfInput" accept=".vcf,text/vcard" hidden>
-          </label>
+          <p style="margin-bottom:12px;">Drag & drop .vcf files here, or click to browse</p>
+          <button type="button" id="triggerVcfBtn" class="btn btn-secondary">Choose vCard File</button>
+          <input type="file" id="vcfInput" accept=".vcf,text/vcard" style="display:none;">
         </div>
       </div>
     </section>
@@ -184,7 +199,7 @@
         <select id="mergeSecondarySelect" class="select"></select>
       </div>
       <p style="font-size:12px; color:#64748b; margin-top:8px;">
-        All interactions, notes, tags, handles, and relationships from the secondary contact will be combined into the primary contact.
+        All interactions, notes, tags, handles, and relationships will be merged into the primary contact.
       </p>
     </div>
     <div class="modal-footer">
