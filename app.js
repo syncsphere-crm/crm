@@ -1,14 +1,8 @@
-/**
- * app.js - SyncSphere Core UI, Storage, and PFP logic
- */
 const STORAGE_KEY = 'syncsphere_contacts_v1';
 
 window.state = {
   contacts: [],
   activeView: 'directory',
-  tagFilter: '',
-  relationFilter: '',
-  overdueOnly: false,
   searchQuery: '',
   handleRowsDraft: [],
   relationRowsDraft: [],
@@ -30,81 +24,90 @@ function toast(msg, ms = 3000) {
 const els = {};
 function cacheEls() {
   const ids = [
-    'globalSearch','settingsBtn','contactGrid','emptyState','tagFilter',
-    'overdueFilterBtn','relationFilter','resultCount','addContactBtn','reportOverdue',
-    'reportTags','exportRawBtn','exportCsvBtn','dropZone','vcfInput','contactModal',
-    'contactModalTitle','contactId','fullNameInput','tagsInput','frequencyInput',
-    'frequencyUnit','handleRows','addHandleBtn','relationRows','relationTargetSelect',
-    'relationLabelInput','addRelationBtn','notesInput','addInteractionBtn',
-    'interactionList','deleteContactBtn','saveContactBtn','interactionModal',
-    'quickInteractionContactId','quickChannelInput','quickSummaryInput',
-    'saveQuickInteractionBtn','settingsModal','wipeLocalBtn','pfpInput', 
-    'pfpPreview', 'pfpImg', 'pfpInitial', 'removePfpBtn',
-    'driveLoginBtn', 'drivePushBtn', 'drivePullBtn' // New SyncSphere Sync Buttons
+    'globalSearch','settingsBtn','contactGrid','emptyState',
+    'resultCount','addContactBtn', 'authDriveBtn', 'syncDriveBtn',
+    'contactModal', 'contactModalTitle','contactId','fullNameInput','tagsInput',
+    'frequencyInput', 'frequencyUnit', 'handleRows','addHandleBtn',
+    'relationRows','relationTargetSelect','relationLabelInput',
+    'addRelationBtn','notesInput','addInteractionBtn','interactionList','deleteContactBtn',
+    'saveContactBtn','interactionModal','quickInteractionContactId','quickChannelInput',
+    'quickSummaryInput','saveQuickInteractionBtn','settingsModal','wipeLocalBtn',
+    'pfpInput', 'pfpPreview', 'pfpImg', 'pfpInitial', 'removePfpBtn',
+    'importVcfBtn', 'vcfInput', 'masterPassword'
   ];
   ids.forEach((id) => { els[id] = document.getElementById(id); });
 }
 
-// --- Storage ---
+// --- Storage & Sync ---
 function loadAllFromStorage() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     window.state.contacts = raw ? JSON.parse(raw) : [];
   } catch (e) { window.state.contacts = []; }
 }
+
 function saveAllToStorage() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(window.state.contacts));
+  syncToDrive(); // Auto-sync triggered on save
 }
 
-// --- SyncSphere: Google Drive Sync & Auth ---
-async function handleDriveLogin() {
+// Drive Sync Logic
+async function syncToDrive() {
+  if (!GoogleDrive.isSignedIn()) return;
+  const pw = els.masterPassword.value;
+  if (!pw) return toast("Set a master password in settings to sync.");
+  
   try {
-    await GoogleDrive.signIn();
-    toast("Logged into Google Drive successfully.");
-    if(els.drivePushBtn) els.drivePushBtn.disabled = false;
-    if(els.drivePullBtn) els.drivePullBtn.disabled = false;
-  } catch (e) {
-    toast("Login failed: " + e.message);
-  }
-}
-
-async function handleDrivePush() {
-  if (!CryptoEngine.isUnlocked()) return toast("Please unlock your vault first.");
-  try {
-    const envelope = await CryptoEngine.encrypt(window.state.contacts);
-    await GoogleDrive.uploadBackup(envelope);
-    toast("Successfully synced data to Google Drive!");
-  } catch (e) {
-    toast("Sync failed: " + e.message);
-  }
-}
-
-async function handleDrivePull() {
-  if (!CryptoEngine.isUnlocked()) return toast("Please unlock your vault first.");
-  try {
-    const envelope = await GoogleDrive.downloadBackup();
-    if (!envelope) {
-      return toast("No backup found in Drive.");
+    if (!CryptoEngine.isUnlocked()) {
+      if (CryptoEngine.hasExistingVault()) {
+        const ok = await CryptoEngine.unlockVault(pw);
+        if(!ok) return toast("Invalid Master Password.");
+      } else {
+        await CryptoEngine.initializeVault(pw);
+      }
     }
-    const decryptedData = await CryptoEngine.decrypt(envelope);
-    window.state.contacts = decryptedData;
-    saveAllToStorage();
-    renderDirectory();
-    toast("Data successfully restored from Drive!");
-  } catch (e) {
-    toast("Pull failed: " + e.message);
+    els.syncDriveBtn.textContent = "Syncing...";
+    const encrypted = await CryptoEngine.encrypt(window.state.contacts);
+    await GoogleDrive.uploadBackup(encrypted);
+    toast("Synced to Drive.");
+  } catch(e) {
+    console.error(e);
+    toast("Sync failed.");
+  } finally {
+    els.syncDriveBtn.textContent = "Sync Data";
   }
 }
+
+async function pullFromDrive() {
+  if (!GoogleDrive.isSignedIn()) return;
+  const pw = els.masterPassword.value;
+  if (!pw) return toast("Set a master password in settings to decrypt.");
+  
+  try {
+     if (!CryptoEngine.isUnlocked()) {
+      if (CryptoEngine.hasExistingVault()) {
+        const ok = await CryptoEngine.unlockVault(pw);
+        if(!ok) return toast("Invalid Master Password.");
+      } else {
+        await CryptoEngine.initializeVault(pw);
+      }
+    }
+    const backup = await GoogleDrive.downloadBackup();
+    if (backup) {
+      const data = await CryptoEngine.decrypt(backup);
+      window.state.contacts = data;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      renderDirectory();
+      toast("Restored from Drive.");
+    }
+  } catch(e) {
+    console.error(e);
+    toast("Restore failed.");
+  }
+}
+
 
 // --- Helpers ---
-function isOverdue(c) {
-  if (!c.frequencyGoalDays || !c.lastContactedAt) return false;
-  return ((Date.now() - c.lastContactedAt) / 86400000) > c.frequencyGoalDays;
-}
-function overdueLevel(c) {
-  if (!isOverdue(c)) return 'ok';
-  return ((Date.now() - c.lastContactedAt) / 86400000) > c.frequencyGoalDays * 2 ? 'red' : 'amber';
-}
 function initials(name) {
   return (name || '?').trim().split(/\s+/).slice(0, 2).map((p) => p[0]?.toUpperCase() || '').join('') || '?';
 }
@@ -118,20 +121,16 @@ function renderDirectory() {
   const q = window.state.searchQuery.toLowerCase();
   
   if (q) list = list.filter(c => c.fullName?.toLowerCase().includes(q) || c.notes?.toLowerCase().includes(q) || (c.tags || []).some(t => t.toLowerCase().includes(q)));
-  if (window.state.tagFilter) list = list.filter(c => (c.tags || []).includes(window.state.tagFilter));
-  if (window.state.overdueOnly) list = list.filter(isOverdue);
-  if (window.state.relationFilter) list = list.filter(c => (c.relationships || []).some(r => r.targetContactId === window.state.relationFilter));
   
   list.sort((a, b) => a.fullName.localeCompare(b.fullName));
   
-  if(els.resultCount) els.resultCount.textContent = `${list.length} contacts`;
-  if(els.contactGrid) els.contactGrid.innerHTML = '';
-  if(els.emptyState) els.emptyState.hidden = list.length > 0;
+  els.resultCount.textContent = `${list.length} contacts`;
+  els.contactGrid.innerHTML = '';
+  els.emptyState.hidden = list.length > 0;
 
   for (const c of list) {
     const card = document.createElement('div');
     card.className = 'contact-card';
-    const lvl = overdueLevel(c);
     
     const pfpHtml = c.pfpBase64 
         ? `<img src="${c.pfpBase64}" style="width:100%;height:100%;object-fit:cover;">` 
@@ -152,13 +151,12 @@ function renderDirectory() {
       openContactModal(c.id);
     });
     card.querySelector('[data-log-id]').addEventListener('click', () => openInteractionModal(c.id));
-    if(els.contactGrid) els.contactGrid.appendChild(card);
+    els.contactGrid.appendChild(card);
   }
 }
 
 // --- PFP Logic ---
 function updatePfpUI() {
-  if(!els.pfpImg) return;
   if (window.state.pendingPfpBase64) {
     els.pfpImg.src = window.state.pendingPfpBase64;
     els.pfpImg.hidden = false;
@@ -180,21 +178,21 @@ function openContactModal(id) {
   els.fullNameInput.value = contact?.fullName || '';
   els.tagsInput.value = (contact?.tags || []).join(', ');
   
-  // Decouple days back into user input based on a simple logic check
+  // Handle frequency parsing back from days to UI
   if (contact?.frequencyGoalDays) {
-    if (contact.frequencyGoalDays % 30 === 0 && els.frequencyUnit) {
-      els.frequencyInput.value = contact.frequencyGoalDays / 30;
-      els.frequencyUnit.value = "30";
-    } else if (contact.frequencyGoalDays % 7 === 0 && els.frequencyUnit) {
-      els.frequencyInput.value = contact.frequencyGoalDays / 7;
-      els.frequencyUnit.value = "7";
-    } else {
-      els.frequencyInput.value = contact.frequencyGoalDays;
-      if(els.frequencyUnit) els.frequencyUnit.value = "1";
-    }
+     if (contact.frequencyGoalDays % 30 === 0) {
+        els.frequencyInput.value = contact.frequencyGoalDays / 30;
+        els.frequencyUnit.value = "30";
+     } else if (contact.frequencyGoalDays % 7 === 0) {
+        els.frequencyInput.value = contact.frequencyGoalDays / 7;
+        els.frequencyUnit.value = "7";
+     } else {
+        els.frequencyInput.value = contact.frequencyGoalDays;
+        els.frequencyUnit.value = "1";
+     }
   } else {
-    els.frequencyInput.value = '';
-    if(els.frequencyUnit) els.frequencyUnit.value = "1";
+     els.frequencyInput.value = '';
+     els.frequencyUnit.value = "1";
   }
 
   els.notesInput.value = contact?.notes || '';
@@ -217,14 +215,15 @@ function saveContactFromModal() {
   const fullName = els.fullNameInput.value.trim();
   if (!fullName) return toast('Name required.');
 
-  // Calculate total days based on the chosen unit (days=1, weeks=7, months=30)
-  const multiplier = els.frequencyUnit ? Number(els.frequencyUnit.value) : 1;
-  const calculatedDays = els.frequencyInput.value ? Number(els.frequencyInput.value) * multiplier : undefined;
+  // Calculate days
+  const freqVal = els.frequencyInput.value ? Number(els.frequencyInput.value) : 0;
+  const freqMulti = Number(els.frequencyUnit.value);
+  const totalDays = freqVal > 0 ? freqVal * freqMulti : undefined;
 
   const contact = {
     id, fullName,
     pfpBase64: window.state.pendingPfpBase64,
-    frequencyGoalDays: calculatedDays,
+    frequencyGoalDays: totalDays,
     lastContactedAt: window.state.interactionsDraft.length ? Math.max(...window.state.interactionsDraft.map(i => i.date)) : undefined,
     contactMethods: window.state.handleRowsDraft.filter((h) => h.value.trim()),
     relationships: window.state.relationRowsDraft,
@@ -240,22 +239,20 @@ function saveContactFromModal() {
 
   saveAllToStorage(); renderDirectory();
   els.contactModal.hidden = true;
+  indexSemanticSearch(); // Update search indices
   if (window.state.activeView === 'network' && window.renderNetworkMap) window.renderNetworkMap(window.state.contacts);
 }
 
 function renderHandleRows() {
-  if(!els.handleRows) return;
   els.handleRows.innerHTML = window.state.handleRowsDraft.map((h, idx) => `<div class="dynamic-row"><input class="input handle-input" data-idx="${idx}" value="${escapeHtml(h.value)}" placeholder="Value"><button type="button" class="row-remove" data-remove-handle="${idx}">&times;</button></div>`).join('');
   els.handleRows.querySelectorAll('.handle-input').forEach(el => el.addEventListener('input', e => window.state.handleRowsDraft[e.target.dataset.idx].value = e.target.value));
   els.handleRows.querySelectorAll('[data-remove-handle]').forEach(btn => btn.addEventListener('click', () => { window.state.handleRowsDraft.splice(+btn.dataset.removeHandle, 1); renderHandleRows(); }));
 }
 function renderRelationRows() {
-  if(!els.relationRows) return;
   els.relationRows.innerHTML = window.state.relationRowsDraft.map((r, idx) => `<div class="dynamic-row"><span style="flex:1;">${escapeHtml(r.label)}</span><button type="button" class="row-remove" data-remove-relation="${idx}">&times;</button></div>`).join('');
   els.relationRows.querySelectorAll('[data-remove-relation]').forEach(btn => btn.addEventListener('click', () => { window.state.relationRowsDraft.splice(+btn.dataset.removeRelation, 1); renderRelationRows(); }));
 }
 function renderInteractionList() {
-  if(!els.interactionList) return;
   els.interactionList.innerHTML = [...window.state.interactionsDraft].sort((a,b) => b.date - a.date).map(i => `
     <div class="interaction-item">
       <div class="interaction-meta"><span>${escapeHtml(i.channel)}</span></div>
@@ -278,55 +275,102 @@ function saveQuickInteraction() {
   saveAllToStorage(); renderDirectory(); els.interactionModal.hidden = true;
 }
 
+// Semantic Search Setup
+const semanticWorker = new Worker('semantic-worker.js');
+semanticWorker.onmessage = (e) => {
+  if (e.data.type === 'query-result') {
+      const topIds = e.data.results.map(r => r.id);
+      window.state.contacts.forEach(c => {
+         // Sort directory by semantic scores if available
+         c._searchScore = topIds.indexOf(c.id);
+      });
+      renderDirectory();
+  }
+};
+function indexSemanticSearch() {
+  const payload = window.state.contacts.map(c => ({ id: c.id, text: `${c.fullName} ${c.notes} ${(c.tags||[]).join(' ')}` }));
+  semanticWorker.postMessage({ type: 'index', payload });
+}
+
 // --- Init & Events ---
 document.addEventListener('DOMContentLoaded', () => {
-  cacheEls(); loadAllFromStorage(); renderDirectory();
+  cacheEls(); loadAllFromStorage(); renderDirectory(); indexSemanticSearch();
 
-  if(els.settingsBtn) els.settingsBtn.addEventListener('click', () => { els.settingsModal.hidden = false; });
-  if(els.wipeLocalBtn) els.wipeLocalBtn.addEventListener('click', () => {
+  els.globalSearch.addEventListener('input', (e) => {
+    window.state.searchQuery = e.target.value;
+    if (window.state.searchQuery.length > 3) {
+       semanticWorker.postMessage({ type: 'query', payload: { text: window.state.searchQuery, topK: 10 } });
+    }
+    renderDirectory();
+  });
+
+  els.settingsBtn.addEventListener('click', () => { els.settingsModal.hidden = false; });
+  els.wipeLocalBtn.addEventListener('click', () => {
     if(!confirm("Erase EVERYTHING?")) return;
     localStorage.removeItem(STORAGE_KEY); window.state.contacts = [];
     renderDirectory(); els.settingsModal.hidden = true; toast("Erased.");
   });
 
-  // Google Drive Event Bindings
-  if(els.driveLoginBtn) els.driveLoginBtn.addEventListener('click', handleDriveLogin);
-  if(els.drivePushBtn) els.drivePushBtn.addEventListener('click', handleDrivePush);
-  if(els.drivePullBtn) els.drivePullBtn.addEventListener('click', handleDrivePull);
+  // VCF Import
+  els.importVcfBtn.addEventListener('click', () => els.vcfInput.click());
+  els.vcfInput.addEventListener('change', (e) => {
+     const file = e.target.files[0];
+     if(!file) return;
+     const reader = new FileReader();
+     reader.onload = (ev) => {
+         const parsed = VCardParser.parse(ev.target.result);
+         parsed.forEach(p => { p.id = uuid(); window.state.contacts.push(p); });
+         saveAllToStorage(); renderDirectory(); toast(`Imported ${parsed.length} contacts.`);
+     };
+     reader.readAsText(file);
+  });
 
-  if(els.pfpInput) els.pfpInput.addEventListener('change', (e) => {
+  // PFP File Reader
+  els.pfpInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => { window.state.pendingPfpBase64 = ev.target.result; updatePfpUI(); };
     reader.readAsDataURL(file);
   });
-  if(els.removePfpBtn) els.removePfpBtn.addEventListener('click', () => { window.state.pendingPfpBase64 = null; updatePfpUI(); els.pfpInput.value = ''; });
-  if(els.fullNameInput) els.fullNameInput.addEventListener('input', updatePfpUI);
+  els.removePfpBtn.addEventListener('click', () => { window.state.pendingPfpBase64 = null; updatePfpUI(); els.pfpInput.value = ''; });
+  els.fullNameInput.addEventListener('input', updatePfpUI);
 
+  // Tabs
   document.querySelectorAll('.tab').forEach((tab) => {
     tab.addEventListener('click', () => {
       document.querySelectorAll('.tab, .view').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
-      const viewEl = document.getElementById(`view-${tab.dataset.view}`);
-      if(viewEl) viewEl.classList.add('active');
+      document.getElementById(`view-${tab.dataset.view}`).classList.add('active');
       window.state.activeView = tab.dataset.view;
       if (tab.dataset.view === 'network' && window.renderNetworkMap) window.renderNetworkMap(window.state.contacts);
       else if (window.stopNetworkMap) window.stopNetworkMap();
     });
   });
 
-  if(els.addContactBtn) els.addContactBtn.addEventListener('click', () => openContactModal(null));
-  if(els.saveContactBtn) els.saveContactBtn.addEventListener('click', saveContactFromModal);
-  if(els.addHandleBtn) els.addHandleBtn.addEventListener('click', () => { window.state.handleRowsDraft.push({ value: '' }); renderHandleRows(); });
-  if(els.addRelationBtn) els.addRelationBtn.addEventListener('click', () => { window.state.relationRowsDraft.push({ targetContactId: els.relationTargetSelect.value, label: els.relationLabelInput.value }); renderRelationRows(); });
-  if(els.addInteractionBtn) els.addInteractionBtn.addEventListener('click', () => { window.state.interactionsDraft.push({ id: uuid(), date: Date.now(), channel: 'Note', summary: '' }); renderInteractionList(); });
-  if(els.saveQuickInteractionBtn) els.saveQuickInteractionBtn.addEventListener('click', saveQuickInteraction);
-  if(els.deleteContactBtn) els.deleteContactBtn.addEventListener('click', () => { if(confirm('Delete?')) { window.state.contacts.find(c => c.id === els.contactId.value).isDeleted = true; saveAllToStorage(); renderDirectory(); els.contactModal.hidden = true; }});
+  // Basic events
+  els.addContactBtn.addEventListener('click', () => openContactModal(null));
+  els.saveContactBtn.addEventListener('click', saveContactFromModal);
+  els.addHandleBtn.addEventListener('click', () => { window.state.handleRowsDraft.push({ value: '' }); renderHandleRows(); });
+  els.addRelationBtn.addEventListener('click', () => { window.state.relationRowsDraft.push({ targetContactId: els.relationTargetSelect.value, label: els.relationLabelInput.value }); renderRelationRows(); });
+  els.addInteractionBtn.addEventListener('click', () => { window.state.interactionsDraft.push({ id: uuid(), date: Date.now(), channel: 'Note', summary: '' }); renderInteractionList(); });
+  els.saveQuickInteractionBtn.addEventListener('click', saveQuickInteraction);
+  els.deleteContactBtn.addEventListener('click', () => { if(confirm('Delete?')) { window.state.contacts.find(c => c.id === els.contactId.value).isDeleted = true; saveAllToStorage(); renderDirectory(); els.contactModal.hidden = true; }});
   
-  document.querySelectorAll('[data-close]').forEach(btn => btn.addEventListener('click', () => {
-    const target = document.getElementById(btn.dataset.close);
-    if(target) target.hidden = true;
-  }));
+  els.authDriveBtn.addEventListener('click', async () => {
+     try {
+       await GoogleDrive.signIn();
+       els.authDriveBtn.hidden = true;
+       els.syncDriveBtn.hidden = false;
+       toast("Connected to Google Drive");
+       pullFromDrive();
+     } catch (e) {
+       toast("Drive auth failed");
+     }
+  });
+
+  els.syncDriveBtn.addEventListener('click', syncToDrive);
+
+  document.querySelectorAll('[data-close]').forEach(btn => btn.addEventListener('click', () => document.getElementById(btn.dataset.close).hidden = true));
   document.querySelectorAll('.modal-backdrop').forEach(b => b.addEventListener('mousedown', e => { if (e.target === b) b.hidden = true; }));
 });

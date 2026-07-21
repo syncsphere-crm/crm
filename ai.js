@@ -1,14 +1,9 @@
-/**
- * ai.js - Local Browser AI
- * Uses SmolLM-135M-Instruct (~85MB), an incredibly smart, tiny instruction model.
- */
-
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1';
 
-// FIX: Ensure it skips local checks and uses the browser cache to properly store the downloaded model
-env.allowLocalModels = false;
-env.useBrowserCache = true;
+// Enable WebAssembly backend threads for speed
 env.backends.onnx.wasm.numThreads = 1; 
+// By ensuring standard remote fetches, it correctly downloads the ~85mb model
+env.allowLocalModels = false; 
 
 let generator = null;
 
@@ -28,8 +23,7 @@ async function loadModel() {
 }
 
 document.getElementById('aiSearchBtn').addEventListener('click', async () => {
-  const searchInput = document.getElementById('globalSearch');
-  const query = searchInput ? searchInput.value.trim() : '';
+  const query = document.getElementById('globalSearch').value.trim();
   if (!query) { alert("Enter a question in the search bar first."); return; }
 
   const btn = document.getElementById('aiSearchBtn');
@@ -42,7 +36,6 @@ document.getElementById('aiSearchBtn').addEventListener('click', async () => {
 
   if (generator) {
     const activeContacts = (window.state.contacts || []).filter(c => !c.isDeleted);
-    
     const dataString = activeContacts.map(c => {
       const rels = (c.relationships||[]).map(r => r.label).join(', ');
       return `Name: ${c.fullName} | Tags: ${(c.tags||[]).join(', ')} | Relations: ${rels||'none'} | Notes: ${c.notes||'none'}`;
@@ -63,7 +56,7 @@ document.getElementById('aiSearchBtn').addEventListener('click', async () => {
 
       const result = await generator(prompt, {
         max_new_tokens: 80,
-        temperature: 0.1, 
+        temperature: 0.1,
         repetition_penalty: 1.15
       });
       
