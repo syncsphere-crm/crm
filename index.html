@@ -6,23 +6,51 @@
 <title>Rolodex — Personal CRM</title>
 <link rel="stylesheet" href="./styles.css">
 <style>
-  /* New layout additions */
+  /* --- NEW ANIMATIONS & TRANSITIONS --- */
+  * { transition: background-color 0.15s ease, border-color 0.15s ease; }
+  
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes slideUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes modalPop { 
+    from { opacity: 0; transform: scale(0.95) translateY(10px); } 
+    to { opacity: 1; transform: scale(1) translateY(0); } 
+  }
+
+  .view.active { animation: fadeIn 0.3s ease-out forwards; }
+  .modal-backdrop:not([hidden]) { animation: fadeIn 0.2s ease-out; }
+  .modal-backdrop:not([hidden]) .modal { animation: modalPop 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+  
+  .contact-card { 
+    transition: transform 0.2s ease, box-shadow 0.2s ease; 
+    animation: slideUp 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .contact-card:hover { transform: translateY(-4px); box-shadow: 0 12px 20px -8px rgba(0,0,0,0.15); }
+  
+  .btn { transition: all 0.2s ease; }
+  .btn:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.05); }
+  .btn:active:not(:disabled) { transform: translateY(1px); filter: brightness(0.95); }
+  
+  /* --- LAYOUT ADDITIONS --- */
   .search-wrap { display: flex; gap: 8px; flex: 1; max-width: 600px; }
   .search-input { flex: 1; }
-  #aiStatus { font-size: 11px; color: #64748b; margin-top: 4px; display: block; }
+  #aiStatus { font-size: 11px; color: #64748b; margin-top: 4px; display: block; position: absolute; }
   
-  /* PFP specific styles */
   .form-row-pfp { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
   .pfp-preview { width: 64px; height: 64px; border-radius: 50%; background: #e2e8f0; display: flex; align-items: center; justify-content: center; font-size: 24px; color: #64748b; font-weight: 600; overflow: hidden; border: 2px solid #cbd5e1; }
   .pfp-preview img { width: 100%; height: 100%; object-fit: cover; }
   
-  /* Network map container */
   .network-wrapper { position: relative; width: 100%; height: 650px; background: #fafafa; border: 1px solid #ddd; border-radius: 8px; overflow: hidden; }
   #networkCanvas { cursor: grab; width: 100%; height: 100%; display: block; }
   #networkCanvas:active { cursor: grabbing; }
   .network-controls { position: absolute; bottom: 16px; right: 16px; display: flex; gap: 8px; }
   
   .interaction-actions { display: flex; gap: 8px; margin-top: 6px; }
+  
+  /* Stagger card animations */
+  .contact-card:nth-child(1) { animation-delay: 0.05s; }
+  .contact-card:nth-child(2) { animation-delay: 0.10s; }
+  .contact-card:nth-child(3) { animation-delay: 0.15s; }
+  .contact-card:nth-child(4) { animation-delay: 0.20s; }
 </style>
 </head>
 <body>
@@ -32,7 +60,7 @@
     <div class="topbar-row">
       <div class="brand">Rolodex</div>
       <div class="search-wrap">
-        <div style="flex:1;">
+        <div style="flex:1; position: relative;">
           <input type="search" id="globalSearch" class="search-input" placeholder="Search names, notes, tags…">
           <span id="aiStatus"></span>
         </div>
@@ -51,7 +79,6 @@
   </header>
 
   <main class="main">
-    <!-- DIRECTORY -->
     <section id="view-directory" class="view active">
       <div class="filter-bar">
         <select id="tagFilter" class="select"><option value="">All tags</option></select>
@@ -68,7 +95,6 @@
       </div>
     </section>
 
-    <!-- NETWORK MAP -->
     <section id="view-network" class="view">
       <div class="report-card report-card-wide" style="padding:0; border:none; background:transparent;">
         <div class="network-wrapper">
@@ -82,7 +108,6 @@
       </div>
     </section>
 
-    <!-- REPORTS & IMPORT (unchanged but included) -->
     <section id="view-reports" class="view">
       <div class="report-grid">
         <div class="report-card"><h3>Overdue reconnects</h3><div id="reportOverdue" class="report-list"></div></div>
@@ -90,21 +115,20 @@
         <div class="report-card report-card-wide"><h3>Export</h3><div class="export-row"><button id="exportRawBtn" class="btn btn-secondary">Download JSON</button><button id="exportCsvBtn" class="btn btn-secondary">Download CSV</button></div></div>
       </div>
     </section>
+    
     <section id="view-import" class="view">
       <div class="import-card"><h3>Import from vCard (.vcf)</h3><div id="dropZone" class="drop-zone"><p>Drag & drop .vcf files here</p><label class="btn btn-secondary file-label">Choose file<input type="file" id="vcfInput" accept=".vcf,text/vcard" hidden></label></div></div>
     </section>
   </main>
 </div>
 
-<!-- CONTACT EDIT MODAL -->
+<!-- MODALS (Identical content to previous, animated via CSS) -->
 <div id="contactModal" class="modal-backdrop" hidden>
   <div class="modal modal-large">
     <div class="modal-header"><h2 id="contactModalTitle">New contact</h2><button type="button" class="modal-close" data-close="contactModal">&times;</button></div>
     <div class="modal-body">
       <form id="contactForm">
         <input type="hidden" id="contactId">
-        
-        <!-- Editable PFP -->
         <div class="form-row-pfp">
           <div class="pfp-preview" id="pfpPreview">
             <span id="pfpInitial">?</span>
@@ -115,7 +139,6 @@
             <button type="button" id="removePfpBtn" class="btn btn-ghost btn-small" style="margin-left:8px;" hidden>Remove</button>
           </div>
         </div>
-
         <div class="form-row"><label>Full name</label><input type="text" id="fullNameInput" class="input" required></div>
         <div class="form-row form-row-split">
           <div><label>Tags (comma separated)</label><input type="text" id="tagsInput" class="input"></div>
@@ -131,7 +154,6 @@
   </div>
 </div>
 
-<!-- QUICK INTERACTION MODAL -->
 <div id="interactionModal" class="modal-backdrop" hidden>
   <div class="modal modal-small">
     <div class="modal-header"><h2>Log interaction</h2><button type="button" class="modal-close" data-close="interactionModal">&times;</button></div>
@@ -144,7 +166,6 @@
   </div>
 </div>
 
-<!-- SETTINGS MODAL -->
 <div id="settingsModal" class="modal-backdrop" hidden>
   <div class="modal modal-small">
     <div class="modal-header"><h2>Settings</h2><button type="button" class="modal-close" data-close="settingsModal">&times;</button></div>
@@ -156,7 +177,6 @@
 
 <div id="toast" class="toast" hidden></div>
 
-<!-- Load our split scripts -->
 <script type="module" src="./ai.js"></script>
 <script src="./network.js"></script>
 <script src="./app.js"></script>

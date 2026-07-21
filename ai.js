@@ -1,62 +1,82 @@
 /**
- * ai.js - 100% Local Browser AI using Transformers.js
- * Powered by a tiny FLAN-T5 model (~70MB down to ~25MB quantized)
+ * ai.js - Local Browser AI
+ * Uses SmolLM-135M-Instruct (~85MB), an incredibly smart, tiny instruction model.
  */
 
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1';
 
-// We do not want it to look for local Node files, force it to fetch from CDN.
+// FIX: Ensure it skips local checks and uses the browser cache to properly store the downloaded model
 env.allowLocalModels = false;
-// Use WebAssembly (which falls back to WebGPU/WebGL natively in modern browsers)
+env.useBrowserCache = true;
 env.backends.onnx.wasm.numThreads = 1; 
 
 let generator = null;
 
 async function loadModel() {
   const statusEl = document.getElementById('aiStatus');
-  statusEl.textContent = "Downloading AI Model (One-time, ~40MB)...";
+  if(statusEl) statusEl.textContent = "Downloading AI Model (One-time, ~85MB)...";
   
   try {
-    // Xenova/LaMini-Flan-T5-77M is a tiny model excellent for basic text processing.
-    generator = await pipeline('text2text-generation', 'Xenova/LaMini-Flan-T5-77M');
-    statusEl.textContent = "AI Ready.";
-    setTimeout(() => { statusEl.textContent = ""; }, 3000);
+    generator = await pipeline('text-generation', 'Xenova/SmolLM-135M-Instruct');
+    if(statusEl) statusEl.textContent = "AI Ready.";
+    setTimeout(() => { if(statusEl) statusEl.textContent = ""; }, 3000);
   } catch (err) {
     console.error(err);
-    statusEl.textContent = "Failed to load model.";
+    if(statusEl) statusEl.textContent = "Failed to load model.";
     document.getElementById('aiSearchBtn').disabled = false;
   }
 }
 
 document.getElementById('aiSearchBtn').addEventListener('click', async () => {
-  const query = document.getElementById('globalSearch').value.trim();
+  const searchInput = document.getElementById('globalSearch');
+  const query = searchInput ? searchInput.value.trim() : '';
   if (!query) { alert("Enter a question in the search bar first."); return; }
 
   const btn = document.getElementById('aiSearchBtn');
   btn.disabled = true;
   btn.textContent = "Thinking...";
 
-  // Lazy load the model on first click
   if (!generator) {
     await loadModel();
   }
 
   if (generator) {
-    // Prepare the CRM data context
     const activeContacts = (window.state.contacts || []).filter(c => !c.isDeleted);
-    const dataString = activeContacts.map(c => `${c.fullName} (Tags: ${(c.tags||[]).join(', ')}). Notes: ${c.notes||'None'}`).join(' | ');
     
-    const prompt = `Context: ${dataString}\n\nQuestion: ${query}\n\nAnswer:`;
+    const dataString = activeContacts.map(c => {
+      const rels = (c.relationships||[]).map(r => r.label).join(', ');
+      return `Name: ${c.fullName} | Tags: ${(c.tags||[]).join(', ')} | Relations: ${rels||'none'} | Notes: ${c.notes||'none'}`;
+    }).join('\n');
+    
+    const systemPrompt = "You are an AI assistant for a CRM. Answer the user's question accurately based ONLY on the provided contact data. If the answer is not in the data, say 'I don't know'.";
+    
+    const messages = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: `Contact Data:\n${dataString}\n\nQuestion: ${query}` }
+    ];
 
     try {
-      const result = await generator(prompt, {
-        max_new_tokens: 50,
-        temperature: 0.1,
+      const prompt = generator.tokenizer.apply_chat_template(messages, { 
+        tokenize: false, 
+        add_generation_prompt: true 
       });
-      alert(`AI Answer:\n\n${result[0].generated_text}`);
+
+      const result = await generator(prompt, {
+        max_new_tokens: 80,
+        temperature: 0.1, 
+        repetition_penalty: 1.15
+      });
+      
+      const generatedText = result[0].generated_text;
+      const answerStart = generatedText.lastIndexOf("<|im_start|>assistant\n");
+      const cleanAnswer = answerStart !== -1 
+        ? generatedText.substring(answerStart + 22).replace("<|im_end|>", "").trim()
+        : generatedText;
+
+      alert(`✨ AI Answer:\n\n${cleanAnswer}`);
     } catch (e) {
       console.error(e);
-      alert("Error generating response.");
+      alert("Error generating response. The context might be too long for the browser memory.");
     }
   }
 
