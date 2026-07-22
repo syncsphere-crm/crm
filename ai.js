@@ -1,76 +1,43 @@
 /**
- * ai.js — Local Gemma 3 inference (on-device, no server calls)
+ * ai.js — Local LLM inference (on-device, no server calls)
  *
- * Uses Google's Gemma 3 1B instruction model, 4-bit quantized, run entirely
- * in the browser via WebGPU (onnx-community/gemma-3-1b-it-ONNX + transformers.js).
- *
- * IMPORTANT NOTE ON SCOPE — read before changing MODEL_ID:
- * A real "Gemma 3 4B" build (onnx-community/gemma-3-4b-it-ONNX) does exist,
- * but it's a vision+text multimodal export meant for server/native ONNX
- * Runtime, not the transformers.js in-browser pipeline — and even quantized
- * it's several GB, which is a rough download for a small local-first CRM.
- * The 1B build below is confirmed to run through transformers.js on WebGPU
- * at a much more reasonable footprint (~1GB, 4-bit). If your target devices
- * and hosting can absorb the bigger download, swapping MODEL_ID to the 4B
- * multimodal repo would require switching from the text-generation pipeline
- * to AutoModelForImageTextToText — a bigger rewrite than a constant change.
- *
- * WHY THE MODEL WAS FAILING TO LOAD, AND WHY THIS REPO NAME:
- * `onnx-community/gemma-3-1b-it-ONNX` only ever got Gemma 3 support in
- * transformers.js for Node.js — the model's own maintainer says as much on
- * the repo's discussion tab. It was never actually validated for the
- * in-browser WebGPU pipeline this app uses, which is why loadModel() was
- * failing for every visitor regardless of device/GPU. The maintainer
- * uploaded a separate, browser/WebGPU-targeted export for this exact
- * purpose: `onnx-community/gemma-3-1b-it-ONNX-GQA`. That's the repo below.
- * Same 1B model, same ~1GB 4-bit footprint, just packaged for the browser
- * runtime instead of Node's ONNX Runtime build.
- *
- * Browsers cannot address a device's NPU directly — there's no public web
- * API for that today. WebGPU (GPU / unified memory) is the real browser-side
- * acceleration path, so that's what capability detection below checks for.
+ * WHY THIS ISN'T GEMMA 3 ANYMORE:
+ * Both Gemma 3 ONNX exports (plain and -GQA) still fail to load in-browser —
+ * confirmed even in Firefox, not just a Chrome/WebGPU quirk — because Gemma
+ * 3's ONNX Runtime WebGPU backend has known open crash/overflow bugs
+ * (JSEP aborts, fp16 overflow) independent of which repo/device is used.
+ * Switched to Qwen2 0.5B Instruct instead: a small, widely-used model with
+ * mature, well-tested transformers.js support on both WebGPU *and* plain
+ * CPU/wasm — so it no longer hard-requires a GPU at all, which also fixes
+ * Firefox (no stable WebGPU there by default).
  */
 
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.1';
 
 env.allowLocalModels = false;
 
-const MODEL_ID = 'onnx-community/gemma-3-1b-it-ONNX-GQA';
+const MODEL_ID = 'onnx-community/Qwen2.5-0.5B-Instruct';
 
 let generator = null;
 let loadingPromise = null;
 let capabilityCache = null;
+let deviceCache = null; // 'webgpu' | 'wasm'
 
-/**
- * Two-step detection: (1) does the browser expose navigator.gpu at all,
- * (2) does requestAdapter() actually resolve to a usable adapter (it can
- * return null on blocklisted drivers, remote desktops, some VMs, etc).
- * A low navigator.deviceMemory reading is an extra, coarse signal that the
- * device likely can't hold the model + KV cache comfortably.
- */
+/** wasm works everywhere, so this device is always usable — we just prefer
+ * WebGPU (faster) when it's actually available. */
 export async function detectCapability() {
   if (capabilityCache) return capabilityCache;
-
-  if (!('gpu' in navigator)) {
-    capabilityCache = { supported: false, reason: "This browser doesn't support WebGPU, which on-device Gemma 3 needs." };
-    return capabilityCache;
-  }
   try {
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) {
-      capabilityCache = { supported: false, reason: "No usable GPU adapter was found on this device/browser." };
-      return capabilityCache;
+    if ('gpu' in navigator && (await navigator.gpu.requestAdapter())) {
+      deviceCache = 'webgpu';
+    } else {
+      deviceCache = 'wasm';
     }
-    if (navigator.deviceMemory && navigator.deviceMemory < 4) {
-      capabilityCache = { supported: false, reason: "This device doesn't have enough memory to run Gemma 3 locally." };
-      return capabilityCache;
-    }
-    capabilityCache = { supported: true };
-    return capabilityCache;
   } catch (e) {
-    capabilityCache = { supported: false, reason: "Couldn't initialize WebGPU on this device." };
-    return capabilityCache;
+    deviceCache = 'wasm';
   }
+  capabilityCache = { supported: true };
+  return capabilityCache;
 }
 
 export function isLoaded() {
@@ -87,7 +54,7 @@ export async function loadModel(onProgress) {
   loadingPromise = (async () => {
     generator = await pipeline('text-generation', MODEL_ID, {
       dtype: 'q4',
-      device: 'webgpu',
+      device: deviceCache || 'wasm',
       progress_callback: (p) => {
         if (onProgress && p.status === 'progress' && p.file) {
           onProgress(Math.round(p.progress || 0), p.file);

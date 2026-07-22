@@ -312,7 +312,7 @@ function initSemanticWorker() {
         if (els.aiStatus) els.aiStatus.textContent = `Found ${matchingIds.size} semantic matches`;
 
         // If this looked like a genuine question rather than a keyword
-        // search, hand the top matches to Gemma 3 for a direct answer.
+        // search, hand the top matches to Local AI for a direct answer.
         maybeAskGemma(lastSemanticQueryText, ranked.slice(0, 8).map(r => r.id));
       } else if (type === 'error') {
         console.error("Worker error:", message);
@@ -415,7 +415,7 @@ function looksLikeQuestion(text) {
 
 function showAIIsland(title) {
   if (!els.aiIsland) return;
-  if (els.aiIslandTitle) els.aiIslandTitle.textContent = title || 'Gemma 3';
+  if (els.aiIslandTitle) els.aiIslandTitle.textContent = title || 'Local AI';
   els.aiIsland.hidden = false;
 }
 function hideAIIsland() {
@@ -435,14 +435,14 @@ async function maybeAskGemma(queryText, topContactIds) {
   }
 
   askInFlight = true;
-  showAIIsland('Gemma 3 — thinking…');
+  showAIIsland('Local AI — thinking…');
   if (els.aiIslandBody) els.aiIslandBody.textContent = 'Reading matching contacts…';
 
   try {
     if (!window.GemmaAI.isLoaded()) {
-      if (els.aiIslandBody) els.aiIslandBody.textContent = 'Loading Gemma 3 on this device (first time only)…';
+      if (els.aiIslandBody) els.aiIslandBody.textContent = 'Loading Local AI on this device (first time only)…';
       await window.GemmaAI.loadModel((pct) => {
-        if (els.aiIslandBody) els.aiIslandBody.textContent = `Loading Gemma 3… ${pct}%`;
+        if (els.aiIslandBody) els.aiIslandBody.textContent = `Loading Local AI… ${pct}%`;
       });
     }
 
@@ -454,7 +454,7 @@ async function maybeAskGemma(queryText, topContactIds) {
       return `${c.fullName} — tags: ${(c.tags||[]).join(', ') || 'none'}; relations: ${rels || 'none'}; notes: ${c.notes || 'none'}`;
     }).join('\n');
 
-    if (els.aiIslandTitle) els.aiIslandTitle.textContent = 'Gemma 3';
+    if (els.aiIslandTitle) els.aiIslandTitle.textContent = 'Local AI';
     if (els.aiIslandBody) els.aiIslandBody.textContent = 'Thinking…';
     const answer = await window.GemmaAI.answerQuestion(queryText, context);
     if (els.aiIslandBody) els.aiIslandBody.textContent = answer || "I couldn't find that in your contacts.";
@@ -510,7 +510,7 @@ async function initGemmaCapabilityUI() {
   gemmaCapability = await window.GemmaAI.detectCapability();
   if (els.aiCapabilityLine) {
     els.aiCapabilityLine.textContent = gemmaCapability.supported
-      ? 'This device can run Gemma 3 locally for direct question answering (ask a full question in AI search mode).'
+      ? 'This device can run Local AI locally for direct question answering (ask a full question in AI search mode).'
       : `Not available on this device: ${gemmaCapability.reason} Semantic search still works normally.`;
   }
 }

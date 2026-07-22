@@ -20,17 +20,9 @@
 }
 [hidden]{display:none !important;}
 html,body{height:100%;}
-@keyframes bg-drift{
-  0%{background-position:0% 0%;}
-  50%{background-position:100% 100%;}
-  100%{background-position:0% 0%;}
-}
 body{
   margin:0;
-  background:var(--text);
   background:linear-gradient(120deg, #FFFFFF 0%, #FBFBF9 35%, #F6F5F1 65%, #FFFFFF 100%);
-  background-size:300% 300%;
-  animation:bg-drift 40s ease-in-out infinite;
   color:var(--text);
   -webkit-font-smoothing:antialiased;
   padding-top:env(safe-area-inset-top);
