@@ -15,6 +15,17 @@
  * multimodal repo would require switching from the text-generation pipeline
  * to AutoModelForImageTextToText — a bigger rewrite than a constant change.
  *
+ * WHY THE MODEL WAS FAILING TO LOAD, AND WHY THIS REPO NAME:
+ * `onnx-community/gemma-3-1b-it-ONNX` only ever got Gemma 3 support in
+ * transformers.js for Node.js — the model's own maintainer says as much on
+ * the repo's discussion tab. It was never actually validated for the
+ * in-browser WebGPU pipeline this app uses, which is why loadModel() was
+ * failing for every visitor regardless of device/GPU. The maintainer
+ * uploaded a separate, browser/WebGPU-targeted export for this exact
+ * purpose: `onnx-community/gemma-3-1b-it-ONNX-GQA`. That's the repo below.
+ * Same 1B model, same ~1GB 4-bit footprint, just packaged for the browser
+ * runtime instead of Node's ONNX Runtime build.
+ *
  * Browsers cannot address a device's NPU directly — there's no public web
  * API for that today. WebGPU (GPU / unified memory) is the real browser-side
  * acceleration path, so that's what capability detection below checks for.
@@ -24,7 +35,7 @@ import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transfo
 
 env.allowLocalModels = false;
 
-const MODEL_ID = 'onnx-community/gemma-3-1b-it-ONNX';
+const MODEL_ID = 'onnx-community/gemma-3-1b-it-ONNX-GQA';
 
 let generator = null;
 let loadingPromise = null;

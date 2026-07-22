@@ -32,9 +32,17 @@
   .btn:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.05); }
   .btn:active:not(:disabled) { transform: translateY(1px); filter: brightness(0.95); }
   
-  .search-wrap { display: flex; flex-direction: column; flex: 1; max-width: 600px; position: relative; }
+  .search-wrap { flex: 1; max-width: 600px; position: relative; }
   .search-input-container { position: relative; display: flex; align-items: center; width: 100%; }
   .search-input-container .search-input { width: 100%; padding-right: 42px; }
+  /* #aiStatus used to sit in normal flow under the pill, which made the
+     whole .search-wrap column taller than the pill itself — since the
+     topbar centers items by their box height, the pill ended up sitting
+     above center instead of level with the Sync button. Taking it out of
+     flow (absolutely positioned under the pill) means .search-wrap's height
+     is just the pill's height, so it centers evenly with everything else
+     in the topbar row. */
+  #aiStatus { position: absolute; top: 100%; left: 2px; }
   
   .ai-toggle-btn {
     position: absolute;
@@ -81,22 +89,20 @@
       </svg>
     </div>
     <h1>SyncSphere</h1>
-    <p class="lock-sub">Your contacts live only on this device. Enter your password to unlock.</p>
+    <p class="lock-sub">Sign in with Google to sync your contacts to your own private Drive folder and pick up where you left off on any device.</p>
 
-    <div id="lockCreateStep" class="lock-step" hidden>
-      <p class="lock-label">Create a password</p>
-      <p class="lock-hint">This locks the app on this device. There's no recovery if you forget it, so write it down somewhere safe.</p>
-      <input type="password" id="lockCreatePassword" class="input" placeholder="New password" autocomplete="new-password">
-      <input type="password" id="lockCreatePasswordConfirm" class="input" placeholder="Confirm password" autocomplete="new-password" style="margin-top:8px;">
-      <button type="button" id="lockCreateBtn" class="btn btn-primary btn-block">Create password &amp; continue</button>
-      <p id="lockCreateError" class="lock-error" hidden></p>
-    </div>
-
-    <div id="lockUnlockStep" class="lock-step" hidden>
-      <p class="lock-label">Password</p>
-      <input type="password" id="lockUnlockPassword" class="input" placeholder="Enter password" autocomplete="current-password">
-      <button type="button" id="lockUnlockBtn" class="btn btn-primary btn-block">Unlock</button>
-      <p id="lockUnlockError" class="lock-error" hidden></p>
+    <div id="lockGoogleStep" class="lock-step">
+      <button type="button" id="googleLoginBtn" class="btn btn-primary btn-block google-btn">
+        <svg class="google-g" viewBox="0 0 48 48" width="18" height="18" aria-hidden="true">
+          <path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.9 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l6-6C34.5 5.5 29.6 3.5 24 3.5 12.7 3.5 3.5 12.7 3.5 24S12.7 44.5 24 44.5 44.5 35.3 44.5 24c0-1.2-.1-2.4-.3-3.5z"/>
+          <path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.9 18.9 13 24 13c3.1 0 5.8 1.1 8 3l6-6C34.5 5.5 29.6 3.5 24 3.5c-8.4 0-15.5 4.8-19.1 11.8z"/>
+          <path fill="#4CAF50" d="M24 44.5c5.5 0 10.4-1.9 14.2-5.1l-6.6-5.4c-2 1.5-4.6 2.5-7.6 2.5-5.3 0-9.7-3.1-11.3-7.5l-6.5 5C10.5 39.7 16.7 44.5 24 44.5z"/>
+          <path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.2-4.3 5.5l6.6 5.4C41.5 35.4 44.5 30.2 44.5 24c0-1.2-.1-2.4-.3-3.5z"/>
+        </svg>
+        Sign in with Google
+      </button>
+      <p id="lockGoogleError" class="lock-error" hidden></p>
+      <p class="lock-hint" style="margin-top:14px; margin-bottom:0;">Not ready to connect Google Drive yet? <button type="button" id="continueOfflineBtn" class="link-btn">Continue without signing in</button> and your contacts will just stay local to this device until you do.</p>
     </div>
   </div>
 </div>
@@ -215,6 +221,9 @@
           <span id="syncStatusLine" class="report-hint" style="margin:0;">Not connected</span>
         </div>
         <p class="report-hint">Signs in with your Google account and stores one backup file in a hidden app folder in your own Drive — not visible in your normal Drive, and not accessible to other apps. Signing in with the same account on another device picks up the same contacts there.</p>
+        <p class="report-hint sync-leave-note" style="margin-top:8px; color:var(--amber); background:var(--amber-bg); padding:8px 10px; border-radius:6px;">
+          ⚠️ SyncSphere makes a best-effort attempt to sync automatically when you close or leave this tab — but it's not guaranteed (and is skipped entirely if you're using a master password). To be safe, tap <strong>Sync</strong> before you close this tab or app.
+        </p>
         <input type="password" id="masterPasswordInput" class="input" placeholder="Master password (optional — encrypts your backup)" style="margin-bottom:8px;">
         <p class="report-hint" style="margin-bottom:14px;">Leave this blank to sync as plain JSON. Set a password to encrypt the backup — you'll need the same password on every device to load it, and there's no recovery if you forget it.</p>
         <div style="display:flex; gap:8px;">
@@ -254,6 +263,10 @@
         </div>
         <div class="form-row"><label>Full name</label><input type="text" id="fullNameInput" class="input" required></div>
         <div class="form-row form-row-split">
+          <div><label>Nickname <span class="label-hint">(optional)</span></label><input type="text" id="nicknameInput" class="input" placeholder="e.g. Bee"></div>
+          <div><label>Middle name <span class="label-hint">(optional)</span></label><input type="text" id="middleNameInput" class="input"></div>
+        </div>
+        <div class="form-row form-row-split">
           <div><label>Tags (comma separated)</label><input type="text" id="tagsInput" class="input"></div>
           <div>
             <label>Reconnect goal</label>
@@ -272,11 +285,37 @@
           <div><label>Job title <span class="label-hint">(optional)</span></label><input type="text" id="jobTitleInput" class="input" placeholder="e.g. Product Designer"></div>
         </div>
         <div class="form-row form-row-split">
-          <div><label>School / College <span class="label-hint">(optional)</span></label><input type="text" id="schoolInput" class="input" placeholder="e.g. UC Berkeley"></div>
-          <div><label>Location <span class="label-hint">(optional)</span></label><input type="text" id="locationInput" class="input" placeholder="e.g. Austin, TX"></div>
+          <div><label>Department <span class="label-hint">(optional)</span></label><input type="text" id="departmentInput" class="input" placeholder="e.g. Marketing"></div>
+          <div><label>Website <span class="label-hint">(optional)</span></label><input type="url" id="websiteInput" class="input" placeholder="https://…"></div>
         </div>
+        <div class="form-row form-row-split">
+          <div><label>School / College <span class="label-hint">(optional)</span></label><input type="text" id="schoolInput" class="input" placeholder="e.g. UC Berkeley"></div>
+          <div><label>Birthday <span class="label-hint">(optional)</span></label><input type="date" id="birthdayInput" class="input"></div>
+        </div>
+        <div class="form-row"><label>Address <span class="label-hint">(optional)</span></label>
+          <input type="text" id="addressStreetInput" class="input" placeholder="Street address" style="margin-bottom:8px;">
+          <div class="form-row-split" style="margin-top:0;">
+            <input type="text" id="addressCityInput" class="input" placeholder="City">
+            <input type="text" id="addressRegionInput" class="input" placeholder="State / Region">
+          </div>
+          <div class="form-row-split" style="margin-top:8px;">
+            <input type="text" id="addressPostalInput" class="input" placeholder="Postal code">
+            <input type="text" id="addressCountryInput" class="input" placeholder="Country">
+          </div>
+          <p class="label-hint" style="margin-top:4px;">Or just use <strong>Location</strong> below for a quick freeform place.</p>
+        </div>
+        <div class="form-row"><label>Location <span class="label-hint">(optional, freeform)</span></label><input type="text" id="locationInput" class="input" placeholder="e.g. Austin, TX"></div>
         <div class="form-row"><label>Contact handles</label><div id="handleRows" class="dynamic-rows"></div><button type="button" id="addHandleBtn" class="btn btn-ghost btn-small">+ Add handle</button></div>
-        <div class="form-row"><label>Relationships</label><div id="relationRows" class="dynamic-rows"></div><div class="relation-add"><select id="relationTargetSelect" class="select"></select><input type="text" id="relationLabelInput" class="input" placeholder="e.g. Sister"><button type="button" id="addRelationBtn" class="btn btn-ghost btn-small">+ Link</button></div></div>
+        <div class="form-row"><label>Custom fields</label><div id="customFieldRows" class="dynamic-rows"></div><button type="button" id="addCustomFieldBtn" class="btn btn-ghost btn-small">+ Add custom field</button></div>
+        <div class="form-row">
+          <label>Relationships</label>
+          <div id="relationRows" class="dynamic-rows"></div>
+          <div class="relation-search-wrap">
+            <input type="text" id="relationSearchInput" class="input" placeholder="Search a contact to link…" autocomplete="off">
+            <div id="relationSearchResults" class="relation-search-results" hidden></div>
+          </div>
+          <p class="label-hint" style="margin-top:4px;">Click a name to link them right away — it's saved with the contact automatically, no extra button needed.</p>
+        </div>
         <div class="form-row"><label>Notes</label><textarea id="notesInput" class="input textarea" rows="4"></textarea></div>
         <div class="form-row"><div class="row-between"><label>Interaction history</label><button type="button" id="addInteractionBtn" class="btn btn-ghost btn-small">+ Log interaction</button></div><div id="interactionList" class="interaction-list"></div></div>
       </form>
@@ -333,6 +372,33 @@
         <p class="settings-label" style="font-weight:600; color:#e11d48; margin-bottom:8px;">Danger Zone</p>
         <button type="button" id="wipeLocalBtn" class="btn btn-danger btn-block">Erase all local data</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<div id="welcomeImportModal" class="modal-backdrop" hidden>
+  <div class="modal modal-large">
+    <div class="modal-header"><h2>Bring your contacts in?</h2><button type="button" class="modal-close" data-close="welcomeImportModal">&times;</button></div>
+    <div class="modal-body">
+      <p class="report-hint" style="margin-bottom:16px;">Your Drive is empty, so it looks like you're just getting started. You can import your existing contacts as a <strong>.vcf (vCard) file</strong> — here's how to export one:</p>
+      <div class="settings-block" style="padding-top:0;">
+        <p class="settings-label" style="font-weight:600;">📇 Google Contacts (any device)</p>
+        <p class="report-hint">Go to contacts.google.com → select the contacts you want (or "Select all") → click <strong>Export</strong> → choose <strong>vCard (for iOS Contacts)</strong> format → download the .vcf file.</p>
+      </div>
+      <div class="settings-block">
+        <p class="settings-label" style="font-weight:600;">🤖 Android</p>
+        <p class="report-hint">Open the <strong>Contacts</strong> app → tap the menu (☰) → <strong>Settings → Export</strong> → choose "Export to .vcf file" → save it, then share/move it to a device where you can upload it here. (Exact wording varies a bit by phone brand.)</p>
+      </div>
+      <div class="settings-block" style="border-bottom:none;">
+        <p class="settings-label" style="font-weight:600;">🍎 iPhone / iPad</p>
+        <p class="report-hint">Easiest path is via iCloud: on a computer, go to <strong>icloud.com/contacts</strong> → select all contacts (⌘/Ctrl+A) → click the gear icon in the bottom-left → <strong>Export vCard</strong>.</p>
+      </div>
+      <p class="report-hint" style="margin-top:14px;">Once you have the .vcf file, use the button below (or the <strong>Sync</strong> tab any time later) to bring it in.</p>
+    </div>
+    <div class="modal-footer">
+      <button type="button" id="welcomeImportLaterBtn" class="btn btn-ghost">Maybe later</button>
+      <div class="modal-footer-spacer"></div>
+      <button type="button" id="welcomeImportNowBtn" class="btn btn-primary">Choose vCard file now</button>
     </div>
   </div>
 </div>

@@ -11,6 +11,7 @@ window.state = {
   searchQuery: '',
   aiSearchEnabled: false,
   handleRowsDraft: [],
+  customFieldsDraft: [],
   relationRowsDraft: [],
   interactionsDraft: [],
   pendingPfpBase64: null,
@@ -48,8 +49,8 @@ function cacheEls() {
     'reportTags','exportRawBtn','exportCsvBtn','dropZone','triggerVcfBtn','vcfInput','contactModal',
     'contactModalTitle','contactId','fullNameInput','tagsInput','frequencyInput', 'frequencyUnitInput',
     'companyInput', 'jobTitleInput', 'schoolInput', 'locationInput',
-    'handleRows','addHandleBtn','relationRows','relationTargetSelect','relationLabelInput',
-    'addRelationBtn','notesInput','addInteractionBtn','interactionList','deleteContactBtn',
+    'handleRows','addHandleBtn','relationRows','relationSearchInput','relationSearchResults',
+    'notesInput','addInteractionBtn','interactionList','deleteContactBtn',
     'saveContactBtn','interactionModal','quickInteractionContactId','quickChannelInput',
     'quickSummaryInput','saveQuickInteractionBtn','settingsModal','wipeLocalBtn',
     'pfpInput', 'pfpPreview', 'pfpImg', 'pfpInitial', 'removePfpBtn',
@@ -59,9 +60,11 @@ function cacheEls() {
     'mergeContactsBtn', 'mergeAllBtn', 'mergeModal', 'mergePrimarySelect', 'mergeSecondarySelect', 'confirmMergeBtn',
     'mergeSuggestions',
     'aiIsland', 'aiIslandTitle', 'aiIslandBody', 'aiIslandClose', 'aiModelStatus',
-    'appShell', 'lockScreen', 'lockCreateStep', 'lockUnlockStep',
-    'lockCreatePassword', 'lockCreatePasswordConfirm', 'lockCreateBtn', 'lockCreateError',
-    'lockUnlockPassword', 'lockUnlockBtn', 'lockUnlockError',
+    'appShell', 'lockScreen', 'lockGoogleStep', 'googleLoginBtn', 'lockGoogleError', 'continueOfflineBtn',
+    'nicknameInput', 'middleNameInput', 'departmentInput', 'websiteInput', 'birthdayInput',
+    'addressStreetInput', 'addressCityInput', 'addressRegionInput', 'addressPostalInput', 'addressCountryInput',
+    'customFieldRows', 'addCustomFieldBtn',
+    'welcomeImportModal', 'welcomeImportNowBtn', 'welcomeImportLaterBtn',
   ];
   ids.forEach((id) => { 
     els[id] = document.getElementById(id); 
@@ -85,6 +88,20 @@ function saveAllToStorage() {
 
 const DRIVE_CONNECTED_KEY = 'rolodex_drive_connected_v1';
 const LAST_SYNC_KEY = 'rolodex_last_synced_v1';
+const ONBOARDING_SEEN_KEY = 'rolodex_onboarding_seen_v1';
+
+/** Shown once, right after a Google sign-in finishes syncing, if it turns
+ * out this account has no contacts yet (fresh Drive AND nothing local) —
+ * a strong signal this is a new user who could use a one-time nudge and
+ * some directions for importing their existing contacts. Only ever offered
+ * once per device, regardless of what they choose, so it doesn't nag. */
+async function maybeShowWelcomeImport() {
+  if (localStorage.getItem(ONBOARDING_SEEN_KEY) === 'true') return;
+  localStorage.setItem(ONBOARDING_SEEN_KEY, 'true');
+  const active = window.state.contacts.filter(c => !c.isDeleted);
+  if (active.length > 0) return;
+  if (els.welcomeImportModal) els.welcomeImportModal.hidden = false;
+}
 
 /**
  * Merge a remote contact list into the local one, per-contact last-write-wins
@@ -221,22 +238,6 @@ async function runFullSync(opts = {}) {
   }
 }
 
-/** Called once on startup: if we've connected before, try to restore the
- * session without any popup, then auto-run a full sync. Does nothing (and
- * shows nothing) if that fails — failing silently here is the point, since
- * most visitors have never connected Drive at all. */
-async function attemptSilentDriveLogin() {
-  if (localStorage.getItem(DRIVE_CONNECTED_KEY) !== 'true') return;
-  for (let i = 0; i < 20 && typeof google === 'undefined'; i++) {
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  const ok = await GoogleDrive.trySilentSignIn().catch(() => false);
-  if (ok) {
-    updateDriveUI();
-    await runFullSync({ silent: true });
-  }
-}
-
 /**
  * Best-effort flush when the tab is about to disappear (closed, backgrounded,
  * navigated away). We can't reliably run the full download+merge+upload dance
@@ -333,14 +334,18 @@ function indexSemanticSearch() {
       .map(r => `${r.label} of ${window.state.contacts.find(t => t.id === r.targetContactId)?.fullName || ''}`)
       .join(', ');
     const handleText = (c.contactMethods || []).map(h => h.platform).join(' ');
+    const customText = (c.customFields || []).filter(f => f.name && f.value).map(f => `${f.name}: ${f.value}`).join(', ');
     const parts = [
-      `Name: ${c.fullName}.`,
-      c.jobTitle || c.company ? `Works as ${[c.jobTitle, c.company].filter(Boolean).join(' at ')}.` : '',
+      `Name: ${c.fullName}${c.nickname ? ` (${c.nickname})` : ''}.`,
+      c.jobTitle || c.company ? `Works as ${[c.jobTitle, c.company].filter(Boolean).join(' at ')}${c.department ? ` in ${c.department}` : ''}.` : '',
       c.school ? `Studied at ${c.school}.` : '',
       c.location ? `Located in ${c.location}.` : '',
+      c.address ? `Address: ${[c.address.street, c.address.city, c.address.region, c.address.postalCode, c.address.country].filter(Boolean).join(', ')}.` : '',
+      c.birthday ? `Birthday: ${c.birthday}.` : '',
       (c.tags || []).length ? `Tags: ${c.tags.join(', ')}.` : '',
       relText ? `Relationships: ${relText}.` : '',
       handleText ? `Reachable via: ${handleText}.` : '',
+      customText ? `Other details: ${customText}.` : '',
       c.notes ? `Notes: ${c.notes}` : '',
     ];
     return { id: c.id, text: parts.filter(Boolean).join(' ') };
@@ -648,17 +653,24 @@ function exportRawJson() {
 
 function exportCsv() {
   const active = window.state.contacts.filter(c => !c.isDeleted);
-  const header = ['Full Name', 'Company', 'Job Title', 'School', 'Location', 'Tags', 'Notes', 'Contact Methods', 'Last Contacted'];
+  const header = ['Full Name', 'Nickname', 'Middle Name', 'Company', 'Job Title', 'Department', 'School', 'Website', 'Birthday', 'Location', 'Address', 'Tags', 'Notes', 'Contact Methods', 'Custom Fields', 'Last Contacted'];
   const csvEscape = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const rows = active.map(c => [
     c.fullName || '',
+    c.nickname || '',
+    c.middleName || '',
     c.company || '',
     c.jobTitle || '',
+    c.department || '',
     c.school || '',
+    c.website || '',
+    c.birthday || '',
     c.location || '',
+    c.address ? [c.address.street, c.address.city, c.address.region, c.address.postalCode, c.address.country].filter(Boolean).join(', ') : '',
     (c.tags || []).join('; '),
     c.notes || '',
     (c.contactMethods || []).map(h => h.value).join('; '),
+    (c.customFields || []).filter(f => f.name || f.value).map(f => `${f.name}: ${f.value}`).join('; '),
     c.lastContactedAt ? new Date(c.lastContactedAt).toISOString() : '',
   ].map(csvEscape).join(','));
   const csv = [header.map(csvEscape).join(','), ...rows].join('\r\n');
@@ -873,6 +885,17 @@ function openContactModal(id) {
   if (els.schoolInput) els.schoolInput.value = contact?.school || '';
   if (els.locationInput) els.locationInput.value = contact?.location || '';
 
+  if (els.nicknameInput) els.nicknameInput.value = contact?.nickname || '';
+  if (els.middleNameInput) els.middleNameInput.value = contact?.middleName || '';
+  if (els.departmentInput) els.departmentInput.value = contact?.department || '';
+  if (els.websiteInput) els.websiteInput.value = contact?.website || '';
+  if (els.birthdayInput) els.birthdayInput.value = contact?.birthday || '';
+  if (els.addressStreetInput) els.addressStreetInput.value = contact?.address?.street || '';
+  if (els.addressCityInput) els.addressCityInput.value = contact?.address?.city || '';
+  if (els.addressRegionInput) els.addressRegionInput.value = contact?.address?.region || '';
+  if (els.addressPostalInput) els.addressPostalInput.value = contact?.address?.postalCode || '';
+  if (els.addressCountryInput) els.addressCountryInput.value = contact?.address?.country || '';
+
   if (els.notesInput) els.notesInput.value = contact?.notes || '';
   if (els.deleteContactBtn) els.deleteContactBtn.hidden = !contact;
 
@@ -880,11 +903,13 @@ function openContactModal(id) {
   updatePfpUI();
 
   window.state.handleRowsDraft = contact ? JSON.parse(JSON.stringify(contact.contactMethods || [])) : [];
+  window.state.customFieldsDraft = contact ? JSON.parse(JSON.stringify(contact.customFields || [])) : [];
   window.state.relationRowsDraft = contact ? JSON.parse(JSON.stringify(contact.relationships || [])) : [];
   window.state.interactionsDraft = contact ? JSON.parse(JSON.stringify(contact.interactions || [])) : [];
 
-  renderHandleRows(); renderRelationRows(); renderInteractionList();
-  if (els.relationTargetSelect) els.relationTargetSelect.innerHTML = window.state.contacts.filter(c => !c.isDeleted && c.id !== id).map(c => `<option value="${c.id}">${escapeHtml(c.fullName)}</option>`).join('');
+  renderHandleRows(); renderCustomFieldRows(); renderRelationRows(); renderInteractionList();
+  if (els.relationSearchInput) els.relationSearchInput.value = '';
+  if (els.relationSearchResults) { els.relationSearchResults.hidden = true; els.relationSearchResults.innerHTML = ''; }
   if (els.contactModal) els.contactModal.hidden = false;
 }
 
@@ -912,8 +937,22 @@ function saveContactFromModal() {
     jobTitle: els.jobTitleInput?.value.trim() || undefined,
     school: els.schoolInput?.value.trim() || undefined,
     location: els.locationInput?.value.trim() || undefined,
+    nickname: els.nicknameInput?.value.trim() || undefined,
+    middleName: els.middleNameInput?.value.trim() || undefined,
+    department: els.departmentInput?.value.trim() || undefined,
+    website: els.websiteInput?.value.trim() || undefined,
+    birthday: els.birthdayInput?.value || undefined,
+    address: (() => {
+      const street = els.addressStreetInput?.value.trim() || '';
+      const city = els.addressCityInput?.value.trim() || '';
+      const region = els.addressRegionInput?.value.trim() || '';
+      const postalCode = els.addressPostalInput?.value.trim() || '';
+      const country = els.addressCountryInput?.value.trim() || '';
+      return (street || city || region || postalCode || country) ? { street, city, region, postalCode, country } : undefined;
+    })(),
     lastContactedAt: window.state.interactionsDraft.length ? Math.max(...window.state.interactionsDraft.map(i => i.date)) : undefined,
     contactMethods: window.state.handleRowsDraft.filter((h) => h.value.trim()),
+    customFields: window.state.customFieldsDraft.filter((f) => f.name.trim() || f.value.trim()),
     relationships: window.state.relationRowsDraft,
     tags: els.tagsInput.value.split(',').map((t) => t.trim()).filter(Boolean),
     notes: els.notesInput.value,
@@ -948,7 +987,7 @@ function syncReciprocalRelationships(contact) {
   });
 }
 
-const HANDLE_PLATFORMS = ['phone', 'email', 'whatsapp', 'discord', 'instagram', 'snapchat', 'other'];
+const HANDLE_PLATFORMS = ['phone', 'email', 'whatsapp', 'discord', 'instagram', 'snapchat', 'telegram', 'signal', 'linkedin', 'x', 'facebook', 'other'];
 
 function renderHandleRows() {
   if(!els.handleRows) return;
@@ -965,14 +1004,73 @@ function renderHandleRows() {
   els.handleRows.querySelectorAll('[data-remove-handle]').forEach(btn => btn.addEventListener('click', () => { window.state.handleRowsDraft.splice(+btn.dataset.removeHandle, 1); renderHandleRows(); }));
 }
 
+/** User-defined fields: a contact-specific name (e.g. "Blood type", "Favorite
+ * coffee order") paired with a value, for anything the built-in fields don't
+ * cover. Stored per-contact as customFields: [{id, name, value}]. */
+function renderCustomFieldRows() {
+  if (!els.customFieldRows) return;
+  els.customFieldRows.innerHTML = window.state.customFieldsDraft.map((f, idx) => `
+    <div class="dynamic-row" data-idx="${idx}">
+      <input class="input custom-field-name" data-idx="${idx}" value="${escapeHtml(f.name)}" placeholder="Field name (e.g. Blood type)" style="flex:0 0 180px;">
+      <input class="input custom-field-value" data-idx="${idx}" value="${escapeHtml(f.value)}" placeholder="Value">
+      <button type="button" class="row-remove btn btn-ghost" data-remove-custom="${idx}">&times;</button>
+    </div>`).join('');
+  els.customFieldRows.querySelectorAll('.custom-field-name').forEach(el => el.addEventListener('input', e => { window.state.customFieldsDraft[+e.target.dataset.idx].name = e.target.value; }));
+  els.customFieldRows.querySelectorAll('.custom-field-value').forEach(el => el.addEventListener('input', e => { window.state.customFieldsDraft[+e.target.dataset.idx].value = e.target.value; }));
+  els.customFieldRows.querySelectorAll('[data-remove-custom]').forEach(btn => btn.addEventListener('click', () => { window.state.customFieldsDraft.splice(+btn.dataset.removeCustom, 1); renderCustomFieldRows(); }));
+}
+
 function renderRelationRows() {
   if(!els.relationRows) return;
   els.relationRows.innerHTML = window.state.relationRowsDraft.map((r, idx) => {
     const target = window.state.contacts.find(c => c.id === r.targetContactId);
     const targetName = target ? target.fullName : '(deleted contact)';
-    return `<div class="dynamic-row" style="display:flex; gap:8px; margin-bottom:4px;"><span style="flex:1;">${escapeHtml(r.label)} — ${escapeHtml(targetName)}</span><button type="button" class="row-remove btn btn-ghost" data-remove-relation="${idx}">&times;</button></div>`;
+    return `
+    <div class="dynamic-row">
+      <span style="flex:0 0 auto; font-size:13.5px; white-space:nowrap;">${escapeHtml(targetName)}</span>
+      <input type="text" class="input relation-row-label" data-relation-label-idx="${idx}" value="${escapeHtml(r.label)}" placeholder="Label, e.g. Sister">
+      <button type="button" class="row-remove btn btn-ghost" data-remove-relation="${idx}" title="Remove link">&times;</button>
+    </div>`;
   }).join('');
+  els.relationRows.querySelectorAll('[data-relation-label-idx]').forEach(el => el.addEventListener('input', e => {
+    window.state.relationRowsDraft[+e.target.dataset.relationLabelIdx].label = e.target.value;
+  }));
   els.relationRows.querySelectorAll('[data-remove-relation]').forEach(btn => btn.addEventListener('click', () => { window.state.relationRowsDraft.splice(+btn.dataset.removeRelation, 1); renderRelationRows(); }));
+}
+
+/** Mini search-as-you-type box for linking relationships: click a name and
+ * it's linked immediately (added to the draft that gets saved with the
+ * contact) — no separate "+Link" button to press. */
+function renderRelationSearchResults(query) {
+  if (!els.relationSearchResults) return;
+  const currentId = els.contactId ? els.contactId.value : '';
+  const linkedIds = new Set(window.state.relationRowsDraft.map(r => r.targetContactId));
+  const q = query.trim().toLowerCase();
+
+  if (!q) { els.relationSearchResults.hidden = true; els.relationSearchResults.innerHTML = ''; return; }
+
+  const matches = window.state.contacts
+    .filter(c => !c.isDeleted && c.id !== currentId && !linkedIds.has(c.id) && c.fullName?.toLowerCase().includes(q))
+    .slice(0, 8);
+
+  els.relationSearchResults.innerHTML = matches.length
+    ? matches.map(c => `<div class="relation-search-result" data-link-id="${c.id}">${escapeHtml(c.fullName)}</div>`).join('')
+    : `<div class="relation-search-empty">No matching contacts.</div>`;
+  els.relationSearchResults.hidden = false;
+
+  els.relationSearchResults.querySelectorAll('[data-link-id]').forEach(row => {
+    row.addEventListener('click', () => {
+      window.state.relationRowsDraft.push({ targetContactId: row.dataset.linkId, label: '' });
+      renderRelationRows();
+      els.relationSearchInput.value = '';
+      els.relationSearchResults.hidden = true;
+      els.relationSearchResults.innerHTML = '';
+      // Focus the freshly-added row's label input so a label can be typed right away.
+      const idx = window.state.relationRowsDraft.length - 1;
+      const labelEl = els.relationRows.querySelector(`[data-relation-label-idx="${idx}"]`);
+      if (labelEl) labelEl.focus();
+    });
+  });
 }
 
 function renderInteractionList() {
@@ -1022,68 +1120,57 @@ function processVCardFile(file) {
   reader.readAsText(file);
 }
 
-// --- Login / lock screen ---
-// Gates the app behind the same password vault crypto.js already uses for
-// encrypted Drive backups: first run asks the person to create a password,
-// every run after that asks them to enter it. The vault key only ever lives
-// in memory for the tab's lifetime (see crypto.js), so this is a real lock,
-// not just a UI toggle — nothing renders until it unlocks.
+// --- Login screen ---
+// Gates the app behind Google sign-in — no separate local password to
+// create or remember. Signing in both grants access and connects Drive
+// sync in one step, since the whole point is "it all goes through Google".
+// A quiet "continue without signing in" escape hatch is kept for people who
+// aren't ready to connect Google yet (matches the README's offline mode);
+// the app still works local-only in that case.
 let appInitialized = false;
 
-function initLockScreen() {
-  const hasVault = CryptoEngine.hasExistingVault();
-  if (els.lockCreateStep) els.lockCreateStep.hidden = hasVault;
-  if (els.lockUnlockStep) els.lockUnlockStep.hidden = !hasVault;
-  if (!hasVault && els.lockCreatePassword) els.lockCreatePassword.focus();
-  else if (els.lockUnlockPassword) els.lockUnlockPassword.focus();
+async function initLockScreen() {
+  if (els.googleLoginBtn) els.googleLoginBtn.addEventListener('click', handleGoogleLogin);
+  if (els.continueOfflineBtn) els.continueOfflineBtn.addEventListener('click', () => unlockApp());
 
-  if (els.lockCreateBtn) els.lockCreateBtn.addEventListener('click', handleCreatePassword);
-  if (els.lockUnlockBtn) els.lockUnlockBtn.addEventListener('click', handleUnlock);
-  if (els.lockCreatePasswordConfirm) els.lockCreatePasswordConfirm.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleCreatePassword(); });
-  if (els.lockUnlockPassword) els.lockUnlockPassword.addEventListener('keydown', (e) => { if (e.key === 'Enter') handleUnlock(); });
-}
-
-async function handleCreatePassword() {
-  const pwd = els.lockCreatePassword.value;
-  const confirmPwd = els.lockCreatePasswordConfirm.value;
-  if (els.lockCreateError) els.lockCreateError.hidden = true;
-
-  if (pwd.length < 6) {
-    if (els.lockCreateError) { els.lockCreateError.textContent = 'Password must be at least 6 characters.'; els.lockCreateError.hidden = false; }
-    return;
-  }
-  if (pwd !== confirmPwd) {
-    if (els.lockCreateError) { els.lockCreateError.textContent = "Passwords don't match."; els.lockCreateError.hidden = false; }
-    return;
-  }
-
-  els.lockCreateBtn.disabled = true;
-  try {
-    await CryptoEngine.initializeVault(pwd);
-    unlockApp();
-  } catch (err) {
-    console.error(err);
-    if (els.lockCreateError) { els.lockCreateError.textContent = 'Could not create a password on this device.'; els.lockCreateError.hidden = false; }
-    els.lockCreateBtn.disabled = false;
-  }
-}
-
-async function handleUnlock() {
-  const pwd = els.lockUnlockPassword.value;
-  if (els.lockUnlockError) els.lockUnlockError.hidden = true;
-  els.lockUnlockBtn.disabled = true;
-  try {
-    const ok = await CryptoEngine.unlockVault(pwd);
+  // If we've connected before, try to resume the Google session silently and
+  // skip the login screen entirely rather than making a returning person
+  // click "Sign in with Google" again every visit.
+  if (localStorage.getItem(DRIVE_CONNECTED_KEY) === 'true') {
+    if (els.googleLoginBtn) { els.googleLoginBtn.disabled = true; els.googleLoginBtn.textContent = 'Signing in…'; }
+    for (let i = 0; i < 20 && typeof google === 'undefined'; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    const ok = await GoogleDrive.trySilentSignIn().catch(() => false);
     if (ok) {
       unlockApp();
-    } else {
-      if (els.lockUnlockError) { els.lockUnlockError.textContent = 'Incorrect password.'; els.lockUnlockError.hidden = false; }
-      els.lockUnlockBtn.disabled = false;
+      await runFullSync({ silent: true });
+      await maybeShowWelcomeImport();
+      return;
     }
+    if (els.googleLoginBtn) { els.googleLoginBtn.disabled = false; els.googleLoginBtn.textContent = 'Sign in with Google'; }
+  }
+}
+
+async function handleGoogleLogin() {
+  if (els.lockGoogleError) els.lockGoogleError.hidden = true;
+  if (!GoogleDrive.isConfigured()) {
+    if (els.lockGoogleError) { els.lockGoogleError.textContent = 'Google sign-in is not configured for this deployment yet — you can continue without it below.'; els.lockGoogleError.hidden = false; }
+    return;
+  }
+  els.googleLoginBtn.disabled = true;
+  try {
+    await GoogleDrive.signIn();
+    localStorage.setItem(DRIVE_CONNECTED_KEY, 'true');
+    unlockApp();
+    toast('Signed in with Google!');
+    await runFullSync();
+    await maybeShowWelcomeImport();
   } catch (err) {
     console.error(err);
-    if (els.lockUnlockError) { els.lockUnlockError.textContent = 'Something went wrong unlocking.'; els.lockUnlockError.hidden = false; }
-    els.lockUnlockBtn.disabled = false;
+    if (els.lockGoogleError) { els.lockGoogleError.textContent = 'Google sign-in failed: ' + err.message; els.lockGoogleError.hidden = false; }
+  } finally {
+    els.googleLoginBtn.disabled = false;
   }
 }
 
@@ -1159,7 +1246,6 @@ function initApp() {
     if (!GoogleDrive.isSignedIn()) { els.settingsModal.hidden = true; document.querySelector('[data-view="import"]').click(); toast('Connect Google Drive first, on the Sync tab.'); return; }
     runFullSync();
   });
-  attemptSilentDriveLogin();
 
   // Best-effort save-before-close (see flushOnHide for what this can and can't do)
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushOnHide(); });
@@ -1211,18 +1297,17 @@ function initApp() {
   if (els.addContactBtn) els.addContactBtn.addEventListener('click', () => openContactModal(null));
   if (els.saveContactBtn) els.saveContactBtn.addEventListener('click', saveContactFromModal);
   if (els.addHandleBtn) els.addHandleBtn.addEventListener('click', () => { window.state.handleRowsDraft.push({ platform: 'phone', value: '' }); renderHandleRows(); });
-  if (els.addRelationBtn) els.addRelationBtn.addEventListener('click', () => {
-    const targetId = els.relationTargetSelect.value;
-    const label = els.relationLabelInput.value.trim();
-    if (!targetId) return toast('Add another contact first to link a relationship.');
-    if (!label) return toast('Enter a relationship label (e.g. Sister).');
-    if (window.state.relationRowsDraft.some(r => r.targetContactId === targetId && r.label.toLowerCase() === label.toLowerCase())) {
-      return toast('That relationship already exists.');
-    }
-    window.state.relationRowsDraft.push({ targetContactId: targetId, label });
-    els.relationLabelInput.value = '';
-    renderRelationRows();
-  });
+  if (els.addCustomFieldBtn) els.addCustomFieldBtn.addEventListener('click', () => { window.state.customFieldsDraft.push({ id: uuid(), name: '', value: '' }); renderCustomFieldRows(); });
+  if (els.relationSearchInput) {
+    els.relationSearchInput.addEventListener('input', (e) => renderRelationSearchResults(e.target.value));
+    els.relationSearchInput.addEventListener('focus', (e) => { if (e.target.value.trim()) renderRelationSearchResults(e.target.value); });
+    document.addEventListener('click', (e) => {
+      if (els.relationSearchResults && !els.relationSearchResults.hidden &&
+          !els.relationSearchResults.contains(e.target) && e.target !== els.relationSearchInput) {
+        els.relationSearchResults.hidden = true;
+      }
+    });
+  }
   if (els.addInteractionBtn) els.addInteractionBtn.addEventListener('click', () => { window.state.interactionsDraft.push({ id: uuid(), date: Date.now(), channel: 'Note', summary: '' }); renderInteractionList(); });
   if (els.saveQuickInteractionBtn) els.saveQuickInteractionBtn.addEventListener('click', saveQuickInteraction);
   if (els.deleteContactBtn) els.deleteContactBtn.addEventListener('click', () => {
@@ -1241,6 +1326,12 @@ function initApp() {
     saveAllToStorage(); renderDirectory(); els.contactModal.hidden = true;
   });
   
+  if (els.welcomeImportLaterBtn) els.welcomeImportLaterBtn.addEventListener('click', () => { els.welcomeImportModal.hidden = true; });
+  if (els.welcomeImportNowBtn) els.welcomeImportNowBtn.addEventListener('click', () => {
+    els.welcomeImportModal.hidden = true;
+    if (els.vcfInput) els.vcfInput.click();
+  });
+
   document.querySelectorAll('[data-close]').forEach(btn => btn.addEventListener('click', () => document.getElementById(btn.dataset.close).hidden = true));
   document.querySelectorAll('.modal-backdrop').forEach(b => b.addEventListener('mousedown', e => { if (e.target === b) b.hidden = true; }));
 }

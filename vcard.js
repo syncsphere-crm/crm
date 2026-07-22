@@ -81,12 +81,36 @@ const VCardParser = (() => {
         case 'NOTE':
           contact.notes = (contact.notes ? contact.notes + '\n' : '') + val;
           break;
-        case 'ORG':
-          contact.company = val.split(';')[0];
+        case 'ORG': {
+          const orgParts = val.split(';');
+          contact.company = orgParts[0];
+          if (orgParts[1]) contact.department = orgParts[1];
           break;
+        }
         case 'TITLE':
           contact.jobTitle = val;
           break;
+        case 'NICKNAME':
+          contact.nickname = val.split(',')[0];
+          break;
+        case 'BDAY': {
+          // vCard dates are usually YYYYMMDD or YYYY-MM-DD; normalize to YYYY-MM-DD for the <input type="date"> field.
+          const digits = val.replace(/[^0-9]/g, '');
+          if (digits.length === 8) contact.birthday = `${digits.slice(0,4)}-${digits.slice(4,6)}-${digits.slice(6,8)}`;
+          else if (/^\d{4}-\d{2}-\d{2}$/.test(val)) contact.birthday = val;
+          break;
+        }
+        case 'URL':
+          if (!contact.website) contact.website = val;
+          break;
+        case 'ADR': {
+          // ADR;TYPE=...:pobox;ext;street;city;region;postalCode;country
+          const p = val.split(';');
+          const street = [p[2], p[1]].filter(Boolean).join(' ').trim();
+          const address = { street, city: p[3] || '', region: p[4] || '', postalCode: p[5] || '', country: p[6] || '' };
+          if (street || address.city || address.region || address.postalCode || address.country) contact.address = address;
+          break;
+        }
         case 'X-SOCIALPROFILE': {
           const typeParam = params.find((p) => p.toUpperCase().startsWith('TYPE'));
           const type = typeParam ? typeParam.split('=')[1]?.toUpperCase() : 'OTHER';
