@@ -23,6 +23,8 @@ let semanticWorker = null;
 let promptInterval = null;
 let gemmaCapability = null; // { supported: bool, reason?: string }
 let lastSemanticQueryText = '';
+let lastRankedContactIds = [];
+let searchDebounceTimer = null;
 const EXAMPLE_PROMPTS = [
   'Try: "Who works at Google?"',
   'Try: "Friends from college"',
@@ -31,6 +33,32 @@ const EXAMPLE_PROMPTS = [
 ];
 
 const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 11));
+
+// --- Embedding cache (item 1c: avoid re-embedding unchanged contacts) ---
+// Keyed by contact id -> { hash, embedding }. Persisted locally, and synced
+// to Drive so a second device doesn't have to redo the (slow, on-device)
+// embedding work either — only genuinely new/changed contacts get embedded.
+const EMBED_CACHE_KEY = 'syncsphere_embed_cache_v1';
+window.state.embedCache = {};
+
+function textHash(str) {
+  // Cheap non-cryptographic hash, only used to detect "did this contact's
+  // indexed text change" — collisions aren't a security concern here.
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) | 0;
+  return h.toString(36);
+}
+
+function loadEmbedCache() {
+  try {
+    const raw = localStorage.getItem(EMBED_CACHE_KEY);
+    window.state.embedCache = raw ? JSON.parse(raw) : {};
+  } catch (e) { window.state.embedCache = {}; }
+}
+
+function saveEmbedCache() {
+  try { localStorage.setItem(EMBED_CACHE_KEY, JSON.stringify(window.state.embedCache)); } catch (e) { /* quota — non-critical */ }
+}
 
 function toast(msg, ms = 3000) {
   const el = document.getElementById('toast');
@@ -226,6 +254,22 @@ async function runFullSync(opts = {}) {
     }
     await GoogleDrive.uploadBackup(uploadPayload);
 
+    // 3. Best-effort sync of the semantic-search embedding cache, so this
+    // device doesn't have to re-embed contacts another device already
+    // indexed. Never lets a failure here affect the main contact sync.
+    try {
+      const remoteIndex = await GoogleDrive.downloadEmbeddingIndex();
+      if (remoteIndex && typeof remoteIndex === 'object') {
+        // Remote fills in anything missing locally; local entries win on
+        // conflict since they're the freshest for this device's edits.
+        window.state.embedCache = { ...remoteIndex, ...window.state.embedCache };
+        saveEmbedCache();
+      }
+      await GoogleDrive.uploadEmbeddingIndex(window.state.embedCache);
+    } catch (e) {
+      // non-critical — worst case, this device just re-embeds locally
+    }
+
     window.state.dirty = false;
     localStorage.setItem(LAST_SYNC_KEY, String(Date.now()));
     updateDriveUI();
@@ -291,6 +335,10 @@ function initSemanticWorker() {
       const { type, results, message } = e.data;
       if (type === 'index-complete') {
         if (els.aiStatus && window.state.aiSearchEnabled) els.aiStatus.textContent = 'AI Model Ready';
+        (e.data.corpus || []).forEach((item) => {
+          window.state.embedCache[item.id] = { hash: item.hash, embedding: item.embedding };
+        });
+        saveEmbedCache();
       } else if (type === 'query-result') {
         const q = window.state.searchQuery.toLowerCase();
         const ranked = results
@@ -311,9 +359,10 @@ function initSemanticWorker() {
         setAIRingState(true, false);
         if (els.aiStatus) els.aiStatus.textContent = `Found ${matchingIds.size} semantic matches`;
 
-        // If this looked like a genuine question rather than a keyword
-        // search, hand the top matches to Local AI for a direct answer.
-        maybeAskGemma(lastSemanticQueryText, ranked.slice(0, 8).map(r => r.id));
+        // Just cache the ranking here — the LLM prompt itself only fires on
+        // Enter (see keydown handler below), not on every keystroke while
+        // still typing.
+        lastRankedContactIds = ranked.slice(0, 10).map(r => r.id);
       } else if (type === 'error') {
         console.error("Worker error:", message);
         setAIRingState(true, false);
@@ -348,7 +397,12 @@ function indexSemanticSearch() {
       customText ? `Other details: ${customText}.` : '',
       c.notes ? `Notes: ${c.notes}` : '',
     ];
-    return { id: c.id, text: parts.filter(Boolean).join(' ') };
+    const text = parts.filter(Boolean).join(' ');
+    const hash = textHash(text);
+    const cached = window.state.embedCache[c.id];
+    const doc = { id: c.id, text, hash };
+    if (cached && cached.hash === hash) doc.embedding = cached.embedding; // unchanged — skip re-embedding
+    return doc;
   });
 
   semanticWorker.postMessage({ type: 'index', payload: docs, requestId: Date.now() });
@@ -400,7 +454,13 @@ function handleSearchInput() {
     setAIRingState(true, true);
     if (els.aiStatus) els.aiStatus.textContent = "Analyzing meanings...";
     lastSemanticQueryText = query;
-    semanticWorker.postMessage({ type: 'query', payload: { text: query, topK: 30 }, requestId: Date.now() });
+    // Debounced: while still typing, only the most recent keystroke's query
+    // actually reaches the worker — avoids piling up a query per character.
+    clearTimeout(searchDebounceTimer);
+    searchDebounceTimer = setTimeout(() => {
+      if (window.state.searchQuery !== query) return; // stale — a newer query already superseded this one
+      semanticWorker.postMessage({ type: 'query', payload: { text: query, topK: 30 }, requestId: Date.now() });
+    }, 220);
   } else {
     renderDirectory();
   }
@@ -446,12 +506,29 @@ async function maybeAskGemma(queryText, topContactIds) {
       });
     }
 
-    const contacts = topContactIds
-      .map(id => window.state.contacts.find(c => c.id === id))
-      .filter(Boolean);
+    // Relationship questions ("how is X related to Y?") need both people's
+    // records present verbatim — semantic ranking alone can miss one of
+    // them, so also pull in any contact whose full name literally appears
+    // in the question text.
+    const lowerQ = queryText.toLowerCase();
+    const mentioned = window.state.contacts.filter(
+      (c) => !c.isDeleted && c.fullName && lowerQ.includes(c.fullName.toLowerCase())
+    );
+    const byId = new Map();
+    [...mentioned, ...topContactIds.map(id => window.state.contacts.find(c => c.id === id))]
+      .filter(Boolean)
+      .forEach((c) => byId.set(c.id, c));
+    const contacts = [...byId.values()].slice(0, 12);
+
     const context = contacts.map(c => {
-      const rels = (c.relationships || []).map(r => r.label).join(', ');
-      return `${c.fullName} — tags: ${(c.tags||[]).join(', ') || 'none'}; relations: ${rels || 'none'}; notes: ${c.notes || 'none'}`;
+      // Resolve relationship targets to their actual names — without this
+      // the model only sees a bare label ("brother of ???") and hallucinates
+      // who it refers to.
+      const rels = (c.relationships || []).map(r => {
+        const target = window.state.contacts.find(t => t.id === r.targetContactId);
+        return `${c.fullName} is the ${r.label} of ${target ? target.fullName : 'someone not in your contacts'}`;
+      }).join('; ');
+      return `${c.fullName} — tags: ${(c.tags||[]).join(', ') || 'none'}; relationships: ${rels || 'none'}; notes: ${c.notes || 'none'}`;
     }).join('\n');
 
     if (els.aiIslandTitle) els.aiIslandTitle.textContent = 'Local AI';
@@ -1186,7 +1263,7 @@ function initApp() {
   if (appInitialized) return;
   appInitialized = true;
 
-  loadAllFromStorage(); renderDirectory();
+  loadAllFromStorage(); loadEmbedCache(); renderDirectory();
   initGemmaCapabilityUI();
 
   if (els.settingsBtn) els.settingsBtn.addEventListener('click', () => { els.settingsModal.hidden = false; });
@@ -1202,7 +1279,10 @@ function initApp() {
     els.globalSearch.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && window.state.aiSearchEnabled && window.state.searchQuery) {
         lastSemanticQueryText = window.state.searchQuery;
-        maybeAskGemma(window.state.searchQuery, window.state.contacts.filter(c => !c.isDeleted).slice(0, 8).map(c => c.id));
+        const ids = lastRankedContactIds.length
+          ? lastRankedContactIds
+          : window.state.contacts.filter(c => !c.isDeleted).slice(0, 10).map(c => c.id);
+        maybeAskGemma(window.state.searchQuery, ids);
       }
     });
   }

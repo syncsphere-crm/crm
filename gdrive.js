@@ -21,11 +21,13 @@ const GoogleDrive = (() => {
   const GOOGLE_CLIENT_ID = '819054758887-dj9fhr71ci4e7jl8m6laf6ep4n1qabhh.apps.googleusercontent.com';
   const SCOPES = 'https://www.googleapis.com/auth/drive.appdata';
   const BACKUP_FILENAME = 'crm_encrypted_backup.json'; // legacy name kept for compatibility with existing backups
+  const EMBED_INDEX_FILENAME = 'crm_semantic_index_v1.json'; // unencrypted — just embedding vectors, no contact text
 
   let tokenClient = null;
   let accessToken = null;
   let tokenExpiresAt = 0;
   let cachedFileId = null;
+  let cachedEmbedFileId = null;
 
   function isConfigured() {
     return GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_ID.startsWith('YOUR_');
@@ -198,6 +200,54 @@ const GoogleDrive = (() => {
     return resp.json();
   }
 
+  /** Same idea as the contact backup, but for the semantic-search embedding
+   * cache — lets a second device skip re-embedding contacts that were
+   * already indexed elsewhere. Not encrypted: it holds only vectors, no
+   * contact text. */
+  async function findEmbedIndexFileId() {
+    if (cachedEmbedFileId) return cachedEmbedFileId;
+    const params = new URLSearchParams({
+      spaces: 'appDataFolder',
+      q: `name='${EMBED_INDEX_FILENAME}' and trashed=false`,
+      fields: 'files(id,name)',
+    });
+    const resp = await apiFetch(`https://www.googleapis.com/drive/v3/files?${params.toString()}`);
+    const json = await resp.json();
+    cachedEmbedFileId = json.files && json.files.length > 0 ? json.files[0].id : null;
+    return cachedEmbedFileId;
+  }
+
+  async function uploadEmbeddingIndex(indexObject) {
+    const fileId = await findEmbedIndexFileId();
+    const body = JSON.stringify(indexObject);
+    if (fileId) {
+      await apiFetch(
+        `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=media`,
+        { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body }
+      );
+      return fileId;
+    }
+    const boundary = 'rolodex_boundary_' + Math.random().toString(36).slice(2);
+    const multipartBody =
+      `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n` +
+      JSON.stringify({ name: EMBED_INDEX_FILENAME, parents: ['appDataFolder'] }) +
+      `\r\n--${boundary}\r\nContent-Type: application/json\r\n\r\n` + body + `\r\n--${boundary}--`;
+    const resp = await apiFetch(
+      'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id',
+      { method: 'POST', headers: { 'Content-Type': `multipart/related; boundary=${boundary}` }, body: multipartBody }
+    );
+    const json = await resp.json();
+    cachedEmbedFileId = json.id;
+    return json.id;
+  }
+
+  async function downloadEmbeddingIndex() {
+    const fileId = await findEmbedIndexFileId();
+    if (!fileId) return null;
+    const resp = await apiFetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`);
+    return resp.json();
+  }
+
   return {
     isConfigured,
     isSignedIn,
@@ -206,5 +256,7 @@ const GoogleDrive = (() => {
     signOut,
     uploadBackup,
     downloadBackup,
+    uploadEmbeddingIndex,
+    downloadEmbeddingIndex,
   };
 })();

@@ -37,14 +37,25 @@ self.onmessage = async (e) => {
   const { type, payload, requestId } = e.data;
   try {
     if (type === 'index') {
+      // Items may already carry a cached `embedding` (unchanged since last
+      // index, restored from the app's local/Drive cache) — only the
+      // remaining items actually need a fresh embed() call. This is what
+      // makes re-indexing after a small edit cheap instead of recomputing
+      // every contact's embedding from scratch.
       const results = [];
       for (const item of payload) {
         if (!item.text || !item.text.trim()) continue;
+        if (item.embedding) {
+          results.push({ id: item.id, embedding: item.embedding, hash: item.hash });
+          continue;
+        }
         const embedding = await embed(item.text);
-        results.push({ id: item.id, embedding });
+        results.push({ id: item.id, embedding, hash: item.hash });
       }
       corpus = results;
-      self.postMessage({ type: 'index-complete', requestId, count: results.length });
+      // Hand the full corpus back so the app can persist any newly-computed
+      // embeddings into its cache (and sync that cache to Drive).
+      self.postMessage({ type: 'index-complete', requestId, count: results.length, corpus: results });
     } else if (type === 'query') {
       if (!payload.text || !payload.text.trim()) {
         self.postMessage({ type: 'query-result', requestId, results: [] });

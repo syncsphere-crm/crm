@@ -91,7 +91,8 @@ export async function answerQuestion(question, contactsContext) {
     {
       role: 'user',
       content:
-        "You are a helpful assistant for a personal CRM. Answer the question in 1-3 short sentences, using ONLY the contact data provided. If the answer isn't in the data, say you don't know.\n\n" +
+        "You are a helpful assistant for a personal CRM. Answer the question in 1-3 short sentences, using ONLY facts explicitly written in the contact data below. " +
+        "Never guess, infer, or assume a relationship, fact, or connection that isn't literally stated. If the answer isn't in the data, say you don't know — do not speculate.\n\n" +
         `Contact data:\n${contactsContext}\n\nQuestion: ${question}`,
     },
   ];

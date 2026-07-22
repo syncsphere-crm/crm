@@ -97,6 +97,36 @@ window.renderNetworkMap = function(contacts) {
       zoom = Math.min(Math.max(0.2, zoom + (e.deltaY * -0.001)), 4);
     });
 
+    // Touch support (iOS/Android): one finger pans, two fingers pinch-zoom.
+    let pinchStartDist = null;
+    let pinchStartZoom = 1;
+    function touchDist(t) {
+      const dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
+      return Math.sqrt(dx * dx + dy * dy);
+    }
+    canvas.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 1) {
+        isDragging = true;
+        startX = e.touches[0].clientX * dpr() - offsetX;
+        startY = e.touches[0].clientY * dpr() - offsetY;
+      } else if (e.touches.length === 2) {
+        isDragging = false;
+        pinchStartDist = touchDist(e.touches);
+        pinchStartZoom = zoom;
+      }
+    }, { passive: true });
+    canvas.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      if (e.touches.length === 1 && isDragging) {
+        offsetX = e.touches[0].clientX * dpr() - startX;
+        offsetY = e.touches[0].clientY * dpr() - startY;
+      } else if (e.touches.length === 2 && pinchStartDist) {
+        const scale = touchDist(e.touches) / pinchStartDist;
+        zoom = Math.min(Math.max(0.2, pinchStartZoom * scale), 4);
+      }
+    }, { passive: false });
+    canvas.addEventListener('touchend', () => { isDragging = false; pinchStartDist = null; });
+
     document.getElementById('zoomInBtn').addEventListener('click', () => zoom = Math.min(zoom + 0.2, 4));
     document.getElementById('zoomOutBtn').addEventListener('click', () => zoom = Math.max(zoom - 0.2, 0.2));
     document.getElementById('resetZoomBtn').addEventListener('click', () => {

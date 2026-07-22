@@ -2,10 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
 <title>SyncSphere — Personal CRM</title>
 <link rel="stylesheet" href="./styles.css">
 <link rel="manifest" href="./manifest.json">
+<!-- Android: Chrome reads theme-color from the manifest, but only from this
+     meta tag on first paint before the manifest loads. -->
+<meta name="theme-color" content="#FFFFFF">
+<!-- iOS: Safari ignores manifest.json entirely for "Add to Home Screen" —
+     these are the tags it actually reads for standalone/PWA behavior. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="SyncSphere">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
 <!-- Google Identity Services Library required for Google Drive OAuth -->
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
@@ -32,7 +41,7 @@
   .btn:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.05); }
   .btn:active:not(:disabled) { transform: translateY(1px); filter: brightness(0.95); }
   
-  .search-wrap { flex: 1; max-width: 600px; position: relative; }
+  .search-wrap { flex: 1; position: relative; }
   .search-input-container { position: relative; display: flex; align-items: center; width: 100%; }
   .search-input-container .search-input { width: 100%; padding-right: 42px; }
   /* #aiStatus used to sit in normal flow under the pill, which made the
