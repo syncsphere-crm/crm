@@ -47,7 +47,11 @@ const GoogleDrive = (() => {
     return tokenClient;
   }
 
-  /** Triggers the Google sign-in popup; resolves once a token is granted. */
+  /** Triggers the Google sign-in popup; resolves once a token is granted.
+   * Guarded with a timeout: on some mobile browsers (popup blocked, tab
+   * backgrounded, ITP/cookie restrictions) the GIS callback never fires at
+   * all, which without this would leave the promise — and the "Sign in"
+   * button — hanging forever. */
   function signIn() {
     return new Promise((resolve, reject) => {
       if (!isConfigured()) {
@@ -58,8 +62,17 @@ const GoogleDrive = (() => {
         reject(new Error('Google Identity Services script has not loaded yet.'));
         return;
       }
+      let settled = false;
+      const timeoutId = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error('Sign-in timed out. Make sure pop-ups are allowed for this site, then try again.'));
+      }, 20000);
       const client = initTokenClient();
       client.callback = (resp) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
         if (resp.error) {
           reject(new Error(resp.error));
           return;
@@ -84,7 +97,12 @@ const GoogleDrive = (() => {
       if (!isConfigured() || typeof google === 'undefined') { resolve(false); return; }
       const client = initTokenClient();
       if (!client) { resolve(false); return; }
+      let settled = false;
+      const timeoutId = setTimeout(() => { if (!settled) { settled = true; resolve(false); } }, 8000);
       client.callback = (resp) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
         if (resp.error) { resolve(false); return; }
         accessToken = resp.access_token;
         tokenExpiresAt = Date.now() + (resp.expires_in ? resp.expires_in * 1000 : 3500 * 1000);
