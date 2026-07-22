@@ -123,6 +123,7 @@ const GoogleDrive = (() => {
     accessToken = null;
     tokenExpiresAt = 0;
     cachedFileId = null;
+    cachedEmbedFileId = null;
   }
 
   async function ensureToken() {

@@ -157,6 +157,7 @@
             </svg>
           </span><span id="syncBtnLabel">Sync</span>
         </button>
+        <div id="unsyncedHint" class="unsynced-hint" hidden>Unsynced changes — sync before leaving.</div>
         <button type="button" id="settingsBtn" class="btn btn-icon" title="Settings">
           <span class="icon">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -168,7 +169,8 @@
       </div>
     </div>
     <nav class="tabbar">
-      <button type="button" class="tab active" data-view="directory">Directory</button>
+      <button type="button" class="tab active" data-view="dashboard">Today</button>
+      <button type="button" class="tab" data-view="directory">Directory</button>
       <button type="button" class="tab" data-view="network">Network Map</button>
       <button type="button" class="tab" data-view="reports">Reports</button>
       <button type="button" class="tab" data-view="import">Sync</button>
@@ -176,7 +178,21 @@
   </header>
 
   <main class="main">
-    <section id="view-directory" class="view active">
+    <section id="view-dashboard" class="view active">
+      <div class="dashboard-grid">
+        <div class="report-card report-card-wide quick-capture-card">
+          <h3>Quick capture</h3>
+          <p class="report-hint">Type naturally: “Met Nina Patel at Stripe. Interested in AI infra. Follow up next week.”</p>
+          <textarea id="quickCaptureInput" class="input textarea" rows="3" placeholder="Capture a contact, memory, or follow-up…"></textarea>
+          <div class="row-between quick-capture-actions"><span id="quickCapturePreview" class="report-hint"></span><button type="button" id="quickCaptureBtn" class="btn btn-primary">Capture</button></div>
+        </div>
+        <div class="report-card"><h3>Today</h3><div id="dashboardToday" class="dash-list"></div></div>
+        <div class="report-card"><h3>Follow-ups</h3><div id="dashboardTasks" class="dash-list"></div></div>
+        <div class="report-card report-card-wide"><h3>Data quality nudges</h3><div id="dashboardQuality" class="quality-list"></div></div>
+      </div>
+    </section>
+
+    <section id="view-directory" class="view">
       <div class="filter-bar">
         <select id="filterSelect" class="select"><option value="">All contacts</option></select>
         <button type="button" id="overdueFilterBtn" class="chip" data-active="false">Overdue</button>
@@ -283,6 +299,19 @@
         <div class="form-row form-row-split">
           <div><label>Tags (comma separated)</label><input type="text" id="tagsInput" class="input"></div>
           <div>
+            <label>Relationship tier</label>
+            <select id="relationshipTierInput" class="select" style="width:100%; margin-top:4px;">
+              <option value="inner">Inner circle</option>
+              <option value="friend">Friend</option>
+              <option value="professional">Professional</option>
+              <option value="acquaintance">Acquaintance</option>
+              <option value="dormant">Dormant</option>
+              <option value="no_remind">Do not remind</option>
+            </select>
+          </div>
+        </div>
+        <div class="form-row form-row-split">
+          <div>
             <label>Reconnect goal</label>
             <div style="display:flex; gap:8px;">
               <input type="number" id="frequencyInput" class="input" style="flex:1;">
@@ -293,7 +322,9 @@
               </select>
             </div>
           </div>
+          <div><label>How we met <span class="label-hint">(optional)</span></label><input type="text" id="metContextInput" class="input" placeholder="e.g. DevTools meetup"></div>
         </div>
+        <div class="form-row"><label>Important dates <span class="label-hint">(optional)</span></label><input type="text" id="importantDatesInput" class="input" placeholder="e.g. work anniversary: May 12; first met: 2024-09-08"></div>
         <div class="form-row form-row-split">
           <div><label>Company <span class="label-hint">(optional)</span></label><input type="text" id="companyInput" class="input" placeholder="e.g. Acme Corp"></div>
           <div><label>Job title <span class="label-hint">(optional)</span></label><input type="text" id="jobTitleInput" class="input" placeholder="e.g. Product Designer"></div>
@@ -383,15 +414,45 @@
         <button type="button" id="clearMeBtn" class="btn btn-secondary btn-small" hidden>Clear</button>
       </div>
       <div class="settings-block" style="margin-bottom: 20px;">
-        <p class="settings-label" style="font-weight:600; margin-bottom:8px;">Local AI (Local AI)</p>
+        <p class="settings-label" style="font-weight:600; margin-bottom:8px;">Local AI</p>
         <p class="report-hint" id="aiCapabilityLine" style="margin-bottom:10px;">Checking this device's capability…</p>
+        <label class="settings-label" for="aiModelSelect">Question-answering model</label>
+        <select id="aiModelSelect" class="select" style="width:100%; margin-top:4px;">
+          <option value="standard">Standard — 0.5B (default, safest)</option>
+          <option value="larger">Larger — 1.7B (faster GPU devices only)</option>
+        </select>
       </div>
-      <hr style="border:none; border-top:1px solid #e2e8f0; margin:16px 0;">
+      <div class="settings-block" style="margin-bottom: 20px;">
+        <p class="settings-label" style="font-weight:600; margin-bottom:8px;">Appearance</p>
+        <label class="settings-label" for="themeSelect">Theme</label>
+        <select id="themeSelect" class="select" style="width:100%; margin-top:4px;">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </div>
+      <hr style="border:none; border-top:1px solid var(--border); margin:16px 0;">
+      <div class="settings-block" style="margin-bottom: 20px;">
+        <p class="settings-label" style="font-weight:600; margin-bottom:8px;">Reminders</p>
+        <p class="report-hint">Enable browser notifications for future follow-up reminders when this browser supports them.</p>
+        <button type="button" id="notificationBtn" class="btn btn-secondary btn-block">Enable notifications</button>
+      </div>
       <div class="settings-block">
         <p class="settings-label" style="font-weight:600; color:#e11d48; margin-bottom:8px;">Danger Zone</p>
         <button type="button" id="wipeLocalBtn" class="btn btn-danger btn-block">Erase all local data</button>
       </div>
     </div>
+  </div>
+</div>
+
+<div id="importReviewModal" class="modal-backdrop" hidden>
+  <div class="modal modal-large">
+    <div class="modal-header"><h2>Review import</h2><button type="button" class="modal-close" data-close="importReviewModal">&times;</button></div>
+    <div class="modal-body">
+      <p class="report-hint">Choose which contacts to import. Possible duplicates are flagged before anything is saved.</p>
+      <div id="importReviewList" class="import-review-list"></div>
+    </div>
+    <div class="modal-footer"><button type="button" id="cancelImportBtn" class="btn btn-ghost">Cancel</button><div class="modal-footer-spacer"></div><button type="button" id="confirmImportBtn" class="btn btn-primary">Import selected</button></div>
   </div>
 </div>
 
