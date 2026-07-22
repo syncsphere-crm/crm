@@ -23,13 +23,17 @@ env.allowLocalModels = false;
 // for on-device/in-browser inference and is the model actually used in most
 // public transformers.js WebGPU demos, so it's a much safer bet to load
 // correctly than picking another general-purpose export at random.
-const MODEL_WEBGPU = 'onnx-community/SmolLM2-1.7B-Instruct';
-const MODEL_WASM = 'onnx-community/Qwen2.5-0.5B-Instruct'; // fallback for devices without WebGPU — 1.7B on plain CPU would be painfully slow
+const MODELS = {
+  standard: 'onnx-community/Qwen2.5-0.5B-Instruct',
+  larger: 'onnx-community/SmolLM2-1.7B-Instruct',
+};
+const MODEL_WASM = MODELS.standard; // safe fallback for devices without WebGPU
 
 let generator = null;
 let loadingPromise = null;
 let capabilityCache = null;
 let deviceCache = null; // 'webgpu' | 'wasm'
+let modelPreference = 'standard';
 
 /** Local AI (the generation model) is skipped entirely on phones/tablets and
  * lower-memory devices — deliberately wide net, since even recent phones
@@ -70,6 +74,15 @@ export function isLoaded() {
   return !!generator;
 }
 
+export function setModelPreference(value) {
+  const next = value === 'larger' ? 'larger' : 'standard';
+  if (next !== modelPreference) {
+    modelPreference = next;
+    generator = null;
+    loadingPromise = null;
+  }
+}
+
 export async function loadModel(onProgress) {
   if (generator) return generator;
   if (loadingPromise) return loadingPromise;
@@ -78,7 +91,7 @@ export async function loadModel(onProgress) {
   if (!capability.supported) throw new Error(capability.reason);
 
   loadingPromise = (async () => {
-    const modelId = deviceCache === 'webgpu' ? MODEL_WEBGPU : MODEL_WASM;
+    const modelId = deviceCache === 'webgpu' && modelPreference === 'larger' ? MODELS.larger : MODELS.standard;
     const progress_callback = (p) => {
       if (onProgress && p.status === 'progress' && p.file) {
         onProgress(Math.round(p.progress || 0), p.file);
@@ -141,4 +154,4 @@ export async function answerQuestion(question, contactsContext) {
   return String(reply || '').trim();
 }
 
-window.GemmaAI = { detectCapability, isLoaded, loadModel, answerQuestion };
+window.GemmaAI = { detectCapability, isLoaded, loadModel, answerQuestion, setModelPreference };

@@ -21,7 +21,7 @@ async function getExtractor() {
     extractorPromise = (async () => {
       const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.1');
       env.allowLocalModels = false;
-      return pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+      return pipeline('feature-extraction', 'Xenova/bge-small-en-v1.5');
     })();
   }
   return extractorPromise;
@@ -49,7 +49,7 @@ self.onmessage = async (e) => {
           results.push({ id: item.id, embedding: item.embedding, hash: item.hash });
           continue;
         }
-        const embedding = await embed(item.text);
+        const embedding = await embed(`Represent this contact for retrieval: ${item.text}`);
         results.push({ id: item.id, embedding, hash: item.hash });
       }
       corpus = results;
@@ -61,7 +61,7 @@ self.onmessage = async (e) => {
         self.postMessage({ type: 'query-result', requestId, results: [] });
         return;
       }
-      const queryEmbedding = await embed(payload.text);
+      const queryEmbedding = await embed(`Represent this sentence for searching relevant contacts: ${payload.text}`);
       const scored = corpus
         .map((c) => ({ id: c.id, score: cosineSimilarity(queryEmbedding, c.embedding) }))
         .sort((a, b) => b.score - a.score)
