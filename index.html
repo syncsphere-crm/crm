@@ -83,6 +83,8 @@
   .network-controls { position: absolute; bottom: 16px; right: 16px; display: flex; gap: 8px; }
   
   .interaction-actions { display: flex; gap: 8px; margin-top: 6px; }
+  .me-toggle-row { display: flex; align-items: center; gap: 8px; font-weight: 500; cursor: pointer; }
+  .me-toggle-row input { width: 16px; height: 16px; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -271,6 +273,9 @@
           </div>
         </div>
         <div class="form-row"><label>Full name</label><input type="text" id="fullNameInput" class="input" required></div>
+        <div class="form-row">
+          <label class="me-toggle-row"><input type="checkbox" id="isMeToggle"> This is me — let Local AI answer questions about "me" / "my" using this contact</label>
+        </div>
         <div class="form-row form-row-split">
           <div><label>Nickname <span class="label-hint">(optional)</span></label><input type="text" id="nicknameInput" class="input" placeholder="e.g. Bee"></div>
           <div><label>Middle name <span class="label-hint">(optional)</span></label><input type="text" id="middleNameInput" class="input"></div>
@@ -372,6 +377,11 @@
   <div class="modal modal-small">
     <div class="modal-header"><h2>Settings</h2><button type="button" class="modal-close" data-close="settingsModal">&times;</button></div>
     <div class="modal-body">
+      <div class="settings-block" style="margin-bottom: 20px;">
+        <p class="settings-label" style="font-weight:600; margin-bottom:8px;">Your profile</p>
+        <p class="report-hint" id="meProfileLine" style="margin-bottom:10px;">Not set — open a contact and check "This is me" so Local AI understands questions about "me" or "my".</p>
+        <button type="button" id="clearMeBtn" class="btn btn-secondary btn-small" hidden>Clear</button>
+      </div>
       <div class="settings-block" style="margin-bottom: 20px;">
         <p class="settings-label" style="font-weight:600; margin-bottom:8px;">Local AI (Local AI)</p>
         <p class="report-hint" id="aiCapabilityLine" style="margin-bottom:10px;">Checking this device's capability…</p>

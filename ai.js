@@ -16,7 +16,8 @@ import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transfo
 
 env.allowLocalModels = false;
 
-const MODEL_ID = 'onnx-community/Qwen2.5-0.5B-Instruct';
+const MODEL_WEBGPU = 'onnx-community/Qwen2.5-1.5B-Instruct'; // reasons noticeably better than 0.5B; needs WebGPU to be fast enough to be usable
+const MODEL_WASM = 'onnx-community/Qwen2.5-0.5B-Instruct'; // fallback for devices without WebGPU — 1.5B on plain CPU would be painfully slow
 
 let generator = null;
 let loadingPromise = null;
@@ -52,7 +53,8 @@ export async function loadModel(onProgress) {
   if (!capability.supported) throw new Error(capability.reason);
 
   loadingPromise = (async () => {
-    generator = await pipeline('text-generation', MODEL_ID, {
+    const modelId = deviceCache === 'webgpu' ? MODEL_WEBGPU : MODEL_WASM;
+    generator = await pipeline('text-generation', modelId, {
       dtype: 'q4',
       device: deviceCache || 'wasm',
       progress_callback: (p) => {

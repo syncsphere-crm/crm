@@ -60,6 +60,32 @@ function saveEmbedCache() {
   try { localStorage.setItem(EMBED_CACHE_KEY, JSON.stringify(window.state.embedCache)); } catch (e) { /* quota — non-critical */ }
 }
 
+// --- "This is me" profile (so the AI can resolve me/my/I to a real contact) ---
+const ME_CONTACT_KEY = 'syncsphere_me_contact_v1';
+window.state.meContactId = null;
+
+function loadMeContact() {
+  window.state.meContactId = localStorage.getItem(ME_CONTACT_KEY) || null;
+}
+function setMeContact(id) {
+  window.state.meContactId = id;
+  if (id) localStorage.setItem(ME_CONTACT_KEY, id); else localStorage.removeItem(ME_CONTACT_KEY);
+  updateMeProfileUI();
+}
+function getMeContact() {
+  if (!window.state.meContactId) return null;
+  return window.state.contacts.find((c) => c.id === window.state.meContactId && !c.isDeleted) || null;
+}
+function updateMeProfileUI() {
+  const me = getMeContact();
+  if (els.meProfileLine) {
+    els.meProfileLine.textContent = me
+      ? `Set to ${me.fullName}. Local AI will treat "me" / "my" / "I" as this contact.`
+      : 'Not set — open a contact and check "This is me" so Local AI understands questions about "me" or "my".';
+  }
+  if (els.clearMeBtn) els.clearMeBtn.hidden = !me;
+}
+
 function toast(msg, ms = 3000) {
   const el = document.getElementById('toast');
   if (!el) return;
@@ -93,6 +119,7 @@ function cacheEls() {
     'addressStreetInput', 'addressCityInput', 'addressRegionInput', 'addressPostalInput', 'addressCountryInput',
     'customFieldRows', 'addCustomFieldBtn',
     'welcomeImportModal', 'welcomeImportNowBtn', 'welcomeImportLaterBtn',
+    'isMeToggle', 'meProfileLine', 'clearMeBtn',
   ];
   ids.forEach((id) => { 
     els[id] = document.getElementById(id); 
@@ -384,8 +411,13 @@ function indexSemanticSearch() {
       .join(', ');
     const handleText = (c.contactMethods || []).map(h => h.platform).join(' ');
     const customText = (c.customFields || []).filter(f => f.name && f.value).map(f => `${f.name}: ${f.value}`).join(', ');
+    const interactionText = (c.interactions || [])
+      .filter(i => i.summary && i.summary.trim())
+      .map(i => `[${i.date ? new Date(i.date).toISOString().slice(0,10) : 'undated'}] ${i.channel || 'Note'}: ${i.summary}`)
+      .join(' | ');
     const parts = [
       `Name: ${c.fullName}${c.nickname ? ` (${c.nickname})` : ''}.`,
+      c.id === window.state.meContactId ? 'This contact is the user themself (me, my, I).' : '',
       c.jobTitle || c.company ? `Works as ${[c.jobTitle, c.company].filter(Boolean).join(' at ')}${c.department ? ` in ${c.department}` : ''}.` : '',
       c.school ? `Studied at ${c.school}.` : '',
       c.location ? `Located in ${c.location}.` : '',
@@ -395,6 +427,7 @@ function indexSemanticSearch() {
       relText ? `Relationships: ${relText}.` : '',
       handleText ? `Reachable via: ${handleText}.` : '',
       customText ? `Other details: ${customText}.` : '',
+      interactionText ? `Interaction history: ${interactionText}.` : '',
       c.notes ? `Notes: ${c.notes}` : '',
     ];
     const text = parts.filter(Boolean).join(' ');
@@ -518,6 +551,12 @@ async function maybeAskGemma(queryText, topContactIds) {
     [...mentioned, ...topContactIds.map(id => window.state.contacts.find(c => c.id === id))]
       .filter(Boolean)
       .forEach((c) => byId.set(c.id, c));
+
+    // If a "me" contact is set, always include them — otherwise "who is my
+    // brother" has no anchor point and the model has to guess.
+    const me = getMeContact();
+    if (me) byId.set(me.id, me);
+
     const contacts = [...byId.values()].slice(0, 12);
 
     const context = contacts.map(c => {
@@ -528,7 +567,12 @@ async function maybeAskGemma(queryText, topContactIds) {
         const target = window.state.contacts.find(t => t.id === r.targetContactId);
         return `${c.fullName} is the ${r.label} of ${target ? target.fullName : 'someone not in your contacts'}`;
       }).join('; ');
-      return `${c.fullName} — tags: ${(c.tags||[]).join(', ') || 'none'}; relationships: ${rels || 'none'}; notes: ${c.notes || 'none'}`;
+      const meNote = me && c.id === me.id ? ' (this is the user themself — "me"/"my"/"I" in the question refers to this person)' : '';
+      const interactions = (c.interactions || [])
+        .filter(i => i.summary && i.summary.trim())
+        .map(i => `[${i.date ? new Date(i.date).toISOString().slice(0,10) : 'undated'}] ${i.channel || 'Note'}: ${i.summary}`)
+        .join('; ');
+      return `${c.fullName}${meNote} — tags: ${(c.tags||[]).join(', ') || 'none'}; relationships: ${rels || 'none'}; notes: ${c.notes || 'none'}; interaction history: ${interactions || 'none'}`;
     }).join('\n');
 
     if (els.aiIslandTitle) els.aiIslandTitle.textContent = 'Local AI';
@@ -975,6 +1019,7 @@ function openContactModal(id) {
 
   if (els.notesInput) els.notesInput.value = contact?.notes || '';
   if (els.deleteContactBtn) els.deleteContactBtn.hidden = !contact;
+  if (els.isMeToggle) els.isMeToggle.checked = !!(contact && contact.id === window.state.meContactId);
 
   window.state.pendingPfpBase64 = contact?.pfpBase64 || null;
   updatePfpUI();
@@ -1042,6 +1087,11 @@ function saveContactFromModal() {
   if (idx >= 0) window.state.contacts[idx] = contact; else window.state.contacts.push(contact);
 
   syncReciprocalRelationships(contact);
+
+  if (els.isMeToggle) {
+    if (els.isMeToggle.checked) setMeContact(id);
+    else if (window.state.meContactId === id) setMeContact(null);
+  }
 
   saveAllToStorage(); renderDirectory();
   els.contactModal.hidden = true;
@@ -1263,10 +1313,11 @@ function initApp() {
   if (appInitialized) return;
   appInitialized = true;
 
-  loadAllFromStorage(); loadEmbedCache(); renderDirectory();
+  loadAllFromStorage(); loadEmbedCache(); loadMeContact(); renderDirectory();
   initGemmaCapabilityUI();
 
-  if (els.settingsBtn) els.settingsBtn.addEventListener('click', () => { els.settingsModal.hidden = false; });
+  if (els.settingsBtn) els.settingsBtn.addEventListener('click', () => { updateMeProfileUI(); els.settingsModal.hidden = false; });
+  if (els.clearMeBtn) els.clearMeBtn.addEventListener('click', () => { setMeContact(null); toast('Cleared your profile.'); });
   if (els.wipeLocalBtn) els.wipeLocalBtn.addEventListener('click', () => {
     if(!confirm("Erase EVERYTHING?")) return;
     localStorage.removeItem(STORAGE_KEY); window.state.contacts = [];
@@ -1397,6 +1448,7 @@ function initApp() {
     if (!deleted) return;
     deleted.isDeleted = true;
     deleted.updatedAt = Date.now();
+    if (window.state.meContactId === deletedId) setMeContact(null);
     window.state.contacts.forEach(c => {
       if (c.id === deletedId || !c.relationships) return;
       const before = c.relationships.length;
