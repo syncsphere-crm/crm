@@ -2,6 +2,7 @@
  * app.js - Core UI, Storage, PFP logic, SyncSphere Integrations, and Semantic Worker
  */
 const STORAGE_KEY = 'syncsphere_contacts_v1';
+const SETTINGS_KEY = 'syncsphere_settings_v1';
 
 window.state = {
   contacts: [],
@@ -16,6 +17,7 @@ window.state = {
   interactionsDraft: [],
   pendingPfpBase64: null,
   dirty: false, // true when local data has changes not yet pushed to Drive
+  settings: { aiModel: 'standard', theme: 'system', updatedAt: 0 },
   dismissedMergePairs: new Set(), // session-only, "idA|idB" sorted
 };
 
@@ -25,6 +27,8 @@ let gemmaCapability = null; // { supported: bool, reason?: string }
 let lastSemanticQueryText = '';
 let lastRankedContactIds = [];
 let searchDebounceTimer = null;
+let autoSyncTimer = null;
+const AUTO_SYNC_DELAY_MS = 5 * 60 * 1000;
 const EXAMPLE_PROMPTS = [
   'Try: "Who works at Google?"',
   'Try: "Friends from college"',
@@ -38,7 +42,7 @@ const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : Math.random().toSt
 // Keyed by contact id -> { hash, embedding }. Persisted locally, and synced
 // to Drive so a second device doesn't have to redo the (slow, on-device)
 // embedding work either — only genuinely new/changed contacts get embedded.
-const EMBED_CACHE_KEY = 'syncsphere_embed_cache_v1';
+const EMBED_CACHE_KEY = 'syncsphere_embed_cache_v2';
 window.state.embedCache = {};
 
 function textHash(str) {
@@ -64,12 +68,35 @@ function saveEmbedCache() {
 const ME_CONTACT_KEY = 'syncsphere_me_contact_v1';
 window.state.meContactId = null;
 
-function loadMeContact() {
-  window.state.meContactId = localStorage.getItem(ME_CONTACT_KEY) || null;
+function defaultSettings() {
+  return { aiModel: 'standard', theme: 'system', meContactId: null, updatedAt: 0 };
+}
+function loadSettings() {
+  try { window.state.settings = { ...defaultSettings(), ...(JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}')) }; }
+  catch (e) { window.state.settings = defaultSettings(); }
+  window.state.meContactId = window.state.settings.meContactId || localStorage.getItem(ME_CONTACT_KEY) || null;
+  applyThemeSetting();
+}
+function saveSettings(markDirty = true) {
+  window.state.settings.meContactId = window.state.meContactId || null;
+  if (markDirty) { window.state.settings.updatedAt = Date.now(); window.state.dirty = true; updateSyncButtonState('dirty'); scheduleAutoSync(); }
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(window.state.settings));
+}
+function applyRemoteSettings(remoteSettings) {
+  if (!remoteSettings || typeof remoteSettings !== 'object') return;
+  if (Number(remoteSettings.updatedAt || 0) >= Number(window.state.settings.updatedAt || 0)) {
+    window.state.settings = { ...defaultSettings(), ...remoteSettings };
+    window.state.meContactId = window.state.settings.meContactId || null;
+    saveSettings(false);
+    applyThemeSetting();
+    updateSettingsUI();
+    updateMeProfileUI();
+  }
 }
 function setMeContact(id) {
   window.state.meContactId = id;
   if (id) localStorage.setItem(ME_CONTACT_KEY, id); else localStorage.removeItem(ME_CONTACT_KEY);
+  saveSettings(true);
   updateMeProfileUI();
 }
 function getMeContact() {
@@ -119,7 +146,7 @@ function cacheEls() {
     'addressStreetInput', 'addressCityInput', 'addressRegionInput', 'addressPostalInput', 'addressCountryInput',
     'customFieldRows', 'addCustomFieldBtn',
     'welcomeImportModal', 'welcomeImportNowBtn', 'welcomeImportLaterBtn',
-    'isMeToggle', 'meProfileLine', 'clearMeBtn',
+    'isMeToggle', 'meProfileLine', 'clearMeBtn', 'aiModelSelect', 'themeSelect', 'unsyncedHint',
   ];
   ids.forEach((id) => { 
     els[id] = document.getElementById(id); 
@@ -138,6 +165,7 @@ function saveAllToStorage() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(window.state.contacts));
   window.state.dirty = true;
   updateSyncButtonState('dirty');
+  scheduleAutoSync();
   indexSemanticSearch();
 }
 
@@ -216,6 +244,15 @@ function updateSyncButtonState(state) {
   } else {
     if (els.syncBtnLabel) els.syncBtnLabel.textContent = 'Sync';
   }
+  if (els.unsyncedHint) els.unsyncedHint.hidden = !window.state.dirty;
+}
+
+function scheduleAutoSync() {
+  clearTimeout(autoSyncTimer);
+  if (!window.state.dirty || !GoogleDrive.isSignedIn()) return;
+  autoSyncTimer = setTimeout(() => {
+    if (window.state.dirty && GoogleDrive.isSignedIn()) runFullSync({ silent: true });
+  }, AUTO_SYNC_DELAY_MS);
 }
 
 /**
@@ -237,6 +274,7 @@ async function runFullSync(opts = {}) {
     if (payload) {
       const isEncrypted = payload.encrypted === true || (payload.iv && typeof payload.data === 'string');
       let remoteContacts = null;
+      let remoteSettings = null;
 
       if (isEncrypted) {
         const pwd = els.masterPasswordInput.value.trim();
@@ -252,9 +290,12 @@ async function runFullSync(opts = {}) {
           updateSyncButtonState('error');
           return;
         }
-        remoteContacts = await CryptoEngine.decrypt(payload);
+        const decrypted = await CryptoEngine.decrypt(payload);
+        remoteContacts = Array.isArray(decrypted) ? decrypted : decrypted.contacts;
+        remoteSettings = Array.isArray(decrypted) ? null : decrypted.settings;
       } else {
         remoteContacts = Array.isArray(payload) ? payload : payload.data;
+        remoteSettings = Array.isArray(payload) ? null : payload.settings;
       }
 
       if (Array.isArray(remoteContacts)) {
@@ -262,6 +303,7 @@ async function runFullSync(opts = {}) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(window.state.contacts));
         renderDirectory();
       }
+      applyRemoteSettings(remoteSettings);
     }
 
     // 2. Push the merged result back up.
@@ -274,10 +316,10 @@ async function runFullSync(opts = {}) {
         updateSyncButtonState('error');
         return;
       }
-      uploadPayload = await CryptoEngine.encrypt(window.state.contacts);
+      uploadPayload = await CryptoEngine.encrypt({ contacts: window.state.contacts, settings: window.state.settings });
       uploadPayload.encrypted = true;
     } else {
-      uploadPayload = { v: 1, encrypted: false, data: window.state.contacts };
+      uploadPayload = { v: 2, encrypted: false, data: window.state.contacts, settings: window.state.settings };
     }
     await GoogleDrive.uploadBackup(uploadPayload);
 
@@ -298,6 +340,7 @@ async function runFullSync(opts = {}) {
     }
 
     window.state.dirty = false;
+    clearTimeout(autoSyncTimer);
     localStorage.setItem(LAST_SYNC_KEY, String(Date.now()));
     updateDriveUI();
     updateSyncButtonState('synced');
@@ -325,8 +368,9 @@ async function flushOnHide() {
   if (!GoogleDrive.isSignedIn()) return;
   if (els.masterPasswordInput && els.masterPasswordInput.value.trim()) return; // encrypted: skip, too risky mid-unload
   try {
-    await GoogleDrive.uploadBackup({ v: 1, encrypted: false, data: window.state.contacts }, { keepalive: true });
+    await GoogleDrive.uploadBackup({ v: 2, encrypted: false, data: window.state.contacts, settings: window.state.settings }, { keepalive: true });
     window.state.dirty = false;
+    clearTimeout(autoSyncTimer);
     localStorage.setItem(LAST_SYNC_KEY, String(Date.now()));
   } catch (e) {
     // best-effort only — nothing to do if this fails during teardown
@@ -624,6 +668,18 @@ async function preloadAIModel() {
     els.aiToggleBtn.classList.remove('loading');
     if (els.aiModelStatus) els.aiModelStatus.textContent = 'AI model failed to load';
   }
+}
+
+function updateSettingsUI() {
+  if (els.aiModelSelect) els.aiModelSelect.value = window.state.settings.aiModel || 'standard';
+  if (window.GemmaAI?.setModelPreference) window.GemmaAI.setModelPreference(window.state.settings.aiModel || 'standard');
+  if (els.themeSelect) els.themeSelect.value = window.state.settings.theme || 'system';
+}
+function applyThemeSetting() {
+  const theme = window.state.settings?.theme || 'system';
+  document.documentElement.dataset.theme = theme;
+  const dark = theme === 'dark' || (theme === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#0b0b0f' : '#f5f5f7');
 }
 
 async function initGemmaCapabilityUI() {
@@ -1313,11 +1369,14 @@ function initApp() {
   if (appInitialized) return;
   appInitialized = true;
 
-  loadAllFromStorage(); loadEmbedCache(); loadMeContact(); renderDirectory();
+  loadAllFromStorage(); loadEmbedCache(); loadSettings(); renderDirectory(); updateSettingsUI();
   initGemmaCapabilityUI();
 
   if (els.settingsBtn) els.settingsBtn.addEventListener('click', () => { updateMeProfileUI(); els.settingsModal.hidden = false; });
   if (els.clearMeBtn) els.clearMeBtn.addEventListener('click', () => { setMeContact(null); toast('Cleared your profile.'); });
+  if (els.aiModelSelect) els.aiModelSelect.addEventListener('change', () => { window.state.settings.aiModel = els.aiModelSelect.value; saveSettings(true); toast('Local AI model preference saved.'); });
+  if (els.themeSelect) els.themeSelect.addEventListener('change', () => { window.state.settings.theme = els.themeSelect.value; applyThemeSetting(); saveSettings(true); });
+  if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyThemeSetting);
   if (els.wipeLocalBtn) els.wipeLocalBtn.addEventListener('click', () => {
     if(!confirm("Erase EVERYTHING?")) return;
     localStorage.removeItem(STORAGE_KEY); window.state.contacts = [];
